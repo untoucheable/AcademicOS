@@ -19,18 +19,19 @@
 }
 
 .dark {
-  --color-background: #0b1120;
-  --color-foreground: #f1f5f9;
+  color-scheme: dark;
+  --color-background: #0f172a;
+  --color-foreground: #f8fafc;
   --color-card: #111827;
-  --color-card-foreground: #f1f5f9;
-  --color-muted: #1e293b;
-  --color-muted-foreground: #94a3b8;
-  --color-border: #1e293b;
-  --color-accent: #6366f1;
+  --color-card-foreground: #f8fafc;
+  --color-muted: #1f2937;
+  --color-muted-foreground: #cbd5e1;
+  --color-border: #334155;
+  --color-accent: #818cf8;
   --color-accent-foreground: #ffffff;
-  --color-accent-muted: #1e1b4b;
+  --color-accent-muted: #1e293b;
   --color-sidebar: #0f172a;
-  --color-sidebar-border: #1e293b;
+  --color-sidebar-border: #334155;
 }
 
 * {
@@ -51,8 +52,8 @@ body {
 }
 
 .dark ::selection {
-  background: #4338ca;
-  color: #e0e7ff;
+  background: #6366f1;
+  color: #f8fafc;
 }
 
 @keyframes fade-in {

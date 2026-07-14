@@ -48,7 +48,14 @@ export function AssignmentRow({
             >
               {assignment.title}
             </p>
-            <p className="text-sm text-muted-foreground">{assignment.course}</p>
+            <div className="mt-1 flex flex-wrap gap-2">
+              <p className="text-sm text-muted-foreground">{assignment.course}</p>
+              {assignment.assessmentType ? (
+                <Badge variant="accent" className="capitalize">
+                  {assignment.assessmentType}
+                </Badge>
+              ) : null}
+            </div>
           </div>
         </div>
       </td>

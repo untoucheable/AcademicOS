@@ -1,10 +1,13 @@
 import {
-  LayoutDashboard,
+  House,
+  Target,
+  CalendarDays,
   ClipboardList,
+  BarChart3,
+  BookOpen,
   FileText,
-  MessageSquare,
-  Wrench,
-  Calendar,
+  Bot,
+  PlugZap,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -16,11 +19,15 @@ export type NavItem = {
 };
 
 export const navItems: NavItem[] = [
-  { label: "Dashboard", href: "/", icon: LayoutDashboard },
+  { label: "Home", href: "/", icon: House },
+  { label: "Mission", href: "/mission", icon: Target },
+  { label: "Calendar", href: "/calendar", icon: CalendarDays },
   { label: "Assignments", href: "/assignments", icon: ClipboardList },
+  { label: "Courses", href: "/courses", icon: BookOpen },
+  { label: "Grades", href: "/grades", icon: BarChart3 },
   { label: "Documents", href: "/documents", icon: FileText },
-  { label: "AI Chat", href: "/ai-chat", icon: MessageSquare },
-  { label: "Study Tools", href: "/study-tools", icon: Wrench },
-  { label: "Calendar", href: "/calendar", icon: Calendar },
+  { label: "AI Tutor", href: "/ai-tutor", icon: Bot },
+  { label: "Analytics", href: "/analytics", icon: BarChart3 },
+  { label: "Integrations", href: "/integrations", icon: PlugZap },
   { label: "Settings", href: "/settings", icon: Settings },
 ];

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { Assignment, AssignmentPriority } from "@/lib/types";
+import type { AssignmentAssessmentType } from "@/lib/assignment";
 import { toDateKey } from "@/lib/date";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 export type AssignmentFormData = {
   title: string;
   course: string;
+  assessmentType: AssignmentAssessmentType;
   dueDate: string;
   priority: AssignmentPriority;
   notes: string;
@@ -31,6 +33,7 @@ export function AssignmentForm({
   const [form, setForm] = useState<AssignmentFormData>({
     title: initial?.title ?? "",
     course: initial?.course ?? "",
+    assessmentType: initial?.assessmentType ?? "assignment",
     dueDate: initial?.dueDate ?? toDateKey(new Date()),
     priority: initial?.priority ?? "medium",
     notes: initial?.notes ?? "",
@@ -55,7 +58,7 @@ export function AssignmentForm({
       <Input
         id="title"
         label="Title"
-        placeholder="Problem Set 4 — Binary Trees"
+        placeholder="Problem Set 4 - Binary Trees"
         value={form.title}
         onChange={(e) => {
           setError("");
@@ -73,6 +76,25 @@ export function AssignmentForm({
           setForm((f) => ({ ...f, course: e.target.value }));
         }}
       />
+      <div className="space-y-1.5">
+        <label htmlFor="assessmentType" className="block text-sm font-medium">
+          Type
+        </label>
+        <select
+          id="assessmentType"
+          value={form.assessmentType}
+          onChange={(e) =>
+            setForm((f) => ({ ...f, assessmentType: e.target.value as AssignmentAssessmentType }))
+          }
+          className="flex h-9 w-full rounded-lg border border-border bg-card px-3 text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
+        >
+          <option value="assignment">Assignment</option>
+          <option value="homework">Homework</option>
+          <option value="test">Test</option>
+          <option value="quiz">Quiz</option>
+          <option value="project">Project</option>
+        </select>
+      </div>
       <div className="grid gap-4 sm:grid-cols-2">
         <Input
           id="dueDate"

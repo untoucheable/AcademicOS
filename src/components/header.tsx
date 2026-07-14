@@ -1,6 +1,7 @@
 "use client";
 
-import { Bell } from "lucide-react";
+import Link from "next/link";
+import { Bell, Sparkles } from "lucide-react";
 
 type HeaderProps = {
   title: string;
@@ -20,6 +21,13 @@ export function Header({ title, description, action }: HeaderProps) {
         </div>
 
         <div className="flex shrink-0 items-center gap-3">
+          <Link
+            href="/ai-tutor"
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-card px-3 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+          >
+            <Sparkles className="h-4 w-4 text-accent" />
+            <span>Ask AcademicOS</span>
+          </Link>
           {action}
           <button
             type="button"

@@ -31,6 +31,9 @@ yarn-error.log*
 # env files
 .env*
 
+# local AcademicOS data
+.academic-os/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

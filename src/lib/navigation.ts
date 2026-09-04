@@ -24,7 +24,6 @@ export const navItems: NavItem[] = [
   { label: "Calendar", href: "/calendar", icon: CalendarDays },
   { label: "Assignments", href: "/assignments", icon: ClipboardList },
   { label: "Courses", href: "/courses", icon: BookOpen },
-  { label: "Grades", href: "/grades", icon: BarChart3 },
   { label: "Documents", href: "/documents", icon: FileText },
   { label: "AI Tutor", href: "/ai-tutor", icon: Bot },
   { label: "Analytics", href: "/analytics", icon: BarChart3 },

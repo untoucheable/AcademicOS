@@ -5,20 +5,19 @@ import { useApp } from "@/components/providers/app-provider";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Trash2 } from "lucide-react";
-import { Modal } from "@/components/ui/modal";
 
 type DocumentEditorProps = {
   id: string;
+  canDelete: boolean;
   onDelete: () => void;
 };
 
-export function DocumentEditor({ id, onDelete }: DocumentEditorProps) {
+export function DocumentEditor({ id, canDelete, onDelete }: DocumentEditorProps) {
   const { documents, updateDocument } = useApp();
   const doc = documents.find((d) => d.id === id);
   const [title, setTitle] = useState(doc?.title ?? "");
   const [content, setContent] = useState(doc?.content ?? "");
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "idle">("idle");
-  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -52,9 +51,11 @@ export function DocumentEditor({ id, onDelete }: DocumentEditorProps) {
         >
           {saveStatus === "saving" ? "Saving..." : saveStatus === "saved" ? "Saved" : ""}
         </span>
-        <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteOpen(true)} aria-label="Delete note">
-          <Trash2 className="h-4 w-4 text-red-500" />
-        </Button>
+        {canDelete && (
+          <Button variant="ghost" size="sm" onClick={onDelete} aria-label="Delete note">
+            <Trash2 className="h-4 w-4 text-red-500" />
+          </Button>
+        )}
       </div>
       <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-5">
         <Input
@@ -77,27 +78,6 @@ export function DocumentEditor({ id, onDelete }: DocumentEditorProps) {
           className="min-h-[400px] flex-1 resize-none bg-transparent text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
         />
       </div>
-      <Modal
-        open={confirmDeleteOpen}
-        onClose={() => setConfirmDeleteOpen(false)}
-        title="Delete note?"
-        description="This will remove the note and its content from AcademicOS."
-      >
-        <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={() => setConfirmDeleteOpen(false)}>
-            Cancel
-          </Button>
-          <Button
-            variant="danger"
-            onClick={() => {
-              setConfirmDeleteOpen(false);
-              onDelete();
-            }}
-          >
-            Delete
-          </Button>
-        </div>
-      </Modal>
     </div>
   );
 }

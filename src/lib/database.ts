@@ -28,11 +28,15 @@ function ensureDataDir() {
   }
 }
 
+function normalizeState(state: StudentState) {
+  return mergeWithDefaultState(state);
+}
+
 function toDatabase(state: StudentState, events: DomainEventRecord[] = []): AcademicDatabase {
   return {
     schemaVersion: 1,
     updatedAt: new Date().toISOString(),
-    state,
+    state: normalizeState(state),
     events,
   };
 }
@@ -65,7 +69,7 @@ export function readDatabase(): AcademicDatabase {
     return {
       schemaVersion: 1,
       updatedAt: parsed.updatedAt || new Date().toISOString(),
-      state: mergeWithDefaultState(parsed.state || (parsed as Partial<StudentState>)),
+      state: normalizeState(mergeWithDefaultState(parsed.state || (parsed as Partial<StudentState>))),
       events: Array.isArray(parsed.events) ? parsed.events : [],
     };
   } catch {
@@ -78,16 +82,18 @@ export function readDatabase(): AcademicDatabase {
 
 export function writeDatabase(database: AcademicDatabase) {
   ensureDataDir();
+  const state = normalizeState(database.state);
   const serialized = JSON.stringify(
     {
       ...database,
+      state,
       updatedAt: new Date().toISOString(),
     },
     null,
     2,
   );
   writeFileSync(DATABASE_FILE, serialized);
-  writeFileSync(LEGACY_STATE_FILE, JSON.stringify(database.state, null, 2));
+  writeFileSync(LEGACY_STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 export function readStateSnapshot(): StudentState {
@@ -116,4 +122,3 @@ export function appendDomainEvent(event: DomainEventRecord) {
     events: [...database.events, event].slice(-500),
   }));
 }
-

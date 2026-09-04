@@ -18,8 +18,53 @@ export type CalendarEvent = {
   relatedCourseId?: string;
   missionId?: string;
   fixed?: boolean;
+  missionOnly?: boolean;
   priority: number;
   createdAt: string;
   source?: "ai" | "manual" | AcademicSourceProvider;
   confidence?: SourceConfidence;
 };
+
+function normalize(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export function getCalendarEventDedupKey(event: Pick<CalendarEvent, "id" | "source" | "externalId">) {
+  return `${event.source || "manual"}:${event.externalId || event.id}`;
+}
+
+export function dedupeCalendarEvents(events: CalendarEvent[]) {
+  const seen = new Map<string, CalendarEvent>();
+
+  for (const event of [...events].sort(
+    (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime() || normalize(a.title).localeCompare(normalize(b.title)),
+  )) {
+    const key = getCalendarEventDedupKey(event);
+    const existing = seen.get(key);
+
+    if (!existing) {
+      seen.set(key, event);
+      continue;
+    }
+
+    if (existing.fixed && !event.fixed) {
+      continue;
+    }
+
+    if (!existing.fixed && event.fixed) {
+      seen.set(key, event);
+      continue;
+    }
+
+    if (existing.createdAt <= event.createdAt) {
+      seen.set(key, event);
+    }
+  }
+
+  return [...seen.values()].sort(
+    (a, b) =>
+      new Date(a.startTime).getTime() - new Date(b.startTime).getTime() ||
+      new Date(a.endTime).getTime() - new Date(b.endTime).getTime() ||
+      normalize(a.title).localeCompare(normalize(b.title)),
+  );
+}

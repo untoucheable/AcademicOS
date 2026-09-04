@@ -26,11 +26,11 @@ export function GradesPageContent() {
 
   const sortedGrades = useMemo(
     () => [...grades].sort((a, b) => calculateGradeAverage(a) - calculateGradeAverage(b)),
-    [grades]
+    [grades],
   );
   const weakest = sortedGrades[0];
   const strongest = [...sortedGrades].sort(
-    (a, b) => calculateGradeAverage(b) - calculateGradeAverage(a)
+    (a, b) => calculateGradeAverage(b) - calculateGradeAverage(a),
   )[0];
   const subjectIntel = useMemo(
     () => buildSubjectIntelligence(grades, memory),
@@ -197,7 +197,10 @@ export function GradesPageContent() {
                           </p>
                           <ul className="space-y-2">
                             {grade.entries.map((entry) => (
-                              <li key={entry.id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2">
+                              <li
+                                key={entry.id}
+                                className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2"
+                              >
                                 <div className="min-w-0">
                                   <p className="truncate text-sm font-medium">{entry.assignmentName}</p>
                                   <p className="text-xs text-muted-foreground">

@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Header } from "@/components/header";
 import { useApp } from "@/components/providers/app-provider";
+import { Button } from "@/components/ui/button";
 import { Badge, priorityVariant } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingScreen } from "@/components/ui/loading";
+import { Modal } from "@/components/ui/modal";
 import {
   formatDate,
   getAssignmentsForDate,
@@ -17,6 +19,8 @@ import {
 import { cn } from "@/lib/utils";
 import { CalendarDays } from "lucide-react";
 import type { CalendarEvent } from "@/lib/calendar";
+import { dedupeCalendarEvents } from "@/lib/calendar";
+import type { CalendarFollowUpItem } from "@/lib/calendar-followups";
 
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -26,49 +30,83 @@ function isImportantCalendarEvent(event: CalendarEvent) {
   return true;
 }
 
-function isUpcomingCalendarEvent(event: CalendarEvent, now: Date) {
-  return new Date(event.endTime).getTime() >= now.getTime();
-}
-
 export function CalendarPageContent() {
   const { isLoaded, assignments } = useApp();
   const [today] = useState(() => new Date());
   const [viewDate, setViewDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [selectedDate, setSelectedDate] = useState<Date>(today);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
-  const [currentTime] = useState(() => new Date());
-  const todayKey = toDateKey(today);
+  const [followUpItems, setFollowUpItems] = useState<CalendarFollowUpItem[]>([]);
+  const [followUpModalOpen, setFollowUpModalOpen] = useState(false);
+  const [lastFollowUpCount, setLastFollowUpCount] = useState(0);
+  const [calendarError, setCalendarError] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const refreshCalendarData = useCallback(async () => {
+    setIsRefreshing(true);
+    setCalendarError("");
+
+    try {
+      const [eventsRes, followUpsRes] = await Promise.all([
+        fetch("/api/calendar/events"),
+        fetch("/api/calendar/follow-ups"),
+      ]);
+
+      if (!eventsRes.ok) {
+        throw new Error("Unable to load calendar events right now.");
+      }
+
+      if (!followUpsRes.ok) {
+        throw new Error("Unable to load calendar follow-ups right now.");
+      }
+
+      const [eventsData, followUpsData] = await Promise.all([
+        eventsRes.json().catch(() => ({})),
+        followUpsRes.json().catch(() => ({})),
+      ]);
+
+      const events = Array.isArray(eventsData.events) ? eventsData.events : [];
+      setCalendarEvents(dedupeCalendarEvents(events));
+      setFollowUpItems(Array.isArray(followUpsData.items) ? followUpsData.items : []);
+    } catch (error) {
+      setCalendarError(error instanceof Error ? error.message : "Unable to load calendar right now.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let active = true;
+    void refreshCalendarData();
+  }, [refreshCalendarData]);
 
-    void fetch("/api/calendar/events")
-      .then((res) => res.json())
-      .then((data) => {
-        if (!active) return;
-        setCalendarEvents(Array.isArray(data.events) ? data.events : []);
-      })
-      .catch(() => {
-        if (!active) return;
-        setCalendarEvents([]);
-      });
-
-    return () => {
-      active = false;
+  useEffect(() => {
+    const handleFocus = () => {
+      void refreshCalendarData();
     };
-  }, []);
+
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [refreshCalendarData]);
+
+  useEffect(() => {
+    if (!followUpItems.length) {
+      setFollowUpModalOpen(false);
+      setLastFollowUpCount(0);
+      return;
+    }
+
+    if (followUpItems.length !== lastFollowUpCount) {
+      setFollowUpModalOpen(true);
+      setLastFollowUpCount(followUpItems.length);
+    }
+  }, [followUpItems.length, lastFollowUpCount]);
 
   const weeks = getMonthGrid(viewDate.getFullYear(), viewDate.getMonth());
   const monthLabel = viewDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-  const selectedAssignments = getAssignmentsForDate(assignments, selectedDate).filter(
-    (assignment) => assignment.dueDate >= todayKey,
-  );
+  const selectedAssignments = getAssignmentsForDate(assignments, selectedDate);
   const importantCalendarEvents = useMemo(
-    () =>
-      calendarEvents
-        .filter(isImportantCalendarEvent)
-        .filter((event) => isUpcomingCalendarEvent(event, currentTime)),
-    [calendarEvents, currentTime],
+    () => dedupeCalendarEvents(calendarEvents).filter(isImportantCalendarEvent),
+    [calendarEvents],
   );
   const selectedCalendarEvents = useMemo(
     () =>
@@ -86,7 +124,8 @@ export function CalendarPageContent() {
 
     const assignmentItems = assignments
       .filter((assignment) => {
-        return assignment.dueDate >= todayKey && assignment.dueDate <= toDateKey(end);
+        const due = new Date(assignment.dueDate);
+        return due >= start && due <= end;
       })
       .map((assignment) => ({
         id: `assignment-${assignment.id}`,
@@ -124,7 +163,25 @@ export function CalendarPageContent() {
     return [...assignmentItems, ...calendarItems].sort(
       (a, b) => new Date(a.when).getTime() - new Date(b.when).getTime(),
     );
-  }, [assignments, importantCalendarEvents, today, todayKey]);
+  }, [assignments, importantCalendarEvents, today]);
+
+  async function resolveFollowUp(itemId: string, action: "finished" | "reschedule") {
+    const res = await fetch("/api/calendar/follow-ups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        followUpId: itemId,
+        action,
+        currentTime: new Date().toISOString(),
+      }),
+    });
+
+    if (!res.ok) return;
+
+    await refreshCalendarData();
+  }
 
   if (!isLoaded) return <LoadingScreen />;
 
@@ -144,6 +201,57 @@ export function CalendarPageContent() {
       />
 
       <main className="p-6">
+        {calendarError ? (
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-5 py-4">
+            <div>
+              <h2 className="font-semibold text-red-900">Calendar data could not be loaded</h2>
+              <p className="mt-0.5 text-sm text-red-800">{calendarError}</p>
+            </div>
+            <Button variant="secondary" onClick={() => void refreshCalendarData()} disabled={isRefreshing}>
+              {isRefreshing ? "Refreshing..." : "Try again"}
+            </Button>
+          </div>
+        ) : null}
+
+        {followUpItems.length ? (
+          <section className="mb-6 overflow-hidden rounded-xl border border-amber-200 bg-amber-50 shadow-sm">
+            <div className="flex items-start justify-between gap-4 border-b border-amber-200 px-5 py-4">
+              <div>
+                <h2 className="font-semibold text-amber-900">End-of-day follow-up</h2>
+                <p className="mt-0.5 text-sm text-amber-800">
+                  These events ended already. Please confirm whether they were finished or need to be moved.
+                </p>
+              </div>
+              <Badge variant="accent">{followUpItems.length}</Badge>
+            </div>
+            <div className="divide-y divide-amber-200">
+              {followUpItems.slice(0, 3).map((item) => (
+                <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-amber-950">{item.title}</p>
+                    <p className="mt-0.5 text-sm text-amber-800">
+                      {new Date(item.originalStartTime).toLocaleString([], {
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={() => void resolveFollowUp(item.id, "finished")}>
+                      Finished
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void resolveFollowUp(item.id, "reschedule")}>
+                      Reschedule
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <section className="mb-6 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
           <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
             <div>
@@ -237,9 +345,7 @@ export function CalendarPageContent() {
                       );
                     }
 
-                    const dayAssignments = getAssignmentsForDate(assignments, date).filter(
-                      (assignment) => assignment.dueDate >= todayKey,
-                    );
+                    const dayAssignments = getAssignmentsForDate(assignments, date);
                     const dayCalendarEvents = importantCalendarEvents.filter((event) => isSameDay(new Date(event.startTime), date));
                     const isTodayCell = isSameDay(date, today);
                     const isSelected = isSameDay(date, selectedDate);
@@ -385,6 +491,41 @@ export function CalendarPageContent() {
           </section>
         </div>
       </main>
+
+      <Modal
+        open={followUpModalOpen}
+        onClose={() => setFollowUpModalOpen(false)}
+        title="Did these events get finished?"
+        description="Pick finished to remove them, or reschedule to move them to the next open slot."
+      >
+        <div className="space-y-3">
+          {followUpItems.map((item) => (
+            <div key={item.id} className="rounded-lg border border-border bg-background p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-medium">{item.title}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {new Date(item.originalStartTime).toLocaleString([], {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => void resolveFollowUp(item.id, "finished")}>
+                    Finished
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => void resolveFollowUp(item.id, "reschedule")}>
+                    Reschedule
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Modal>
     </>
   );
 }

@@ -1,11 +1,12 @@
 import { removeCalendarEventById } from "@/lib/calendar-actions";
+import { dedupeCalendarEvents } from "@/lib/calendar";
 import { getState, updateState } from "@/lib/server-state";
 
 export async function GET() {
   const state = getState();
 
   return Response.json({
-    events: state.calendar,
+    events: dedupeCalendarEvents(state.calendar),
   });
 }
 

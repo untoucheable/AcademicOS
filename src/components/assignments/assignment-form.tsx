@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { Assignment, AssignmentPriority } from "@/lib/types";
-import type { AssignmentAssessmentType } from "@/lib/assignment";
+import type { AssignmentAssessmentType, AssignmentStatus } from "@/lib/assignment";
 import { toDateKey } from "@/lib/date";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,8 @@ export type AssignmentFormData = {
   assessmentType: AssignmentAssessmentType;
   dueDate: string;
   priority: AssignmentPriority;
+  status: AssignmentStatus;
+  estimatedMinutes: number;
   notes: string;
 };
 
@@ -36,6 +38,8 @@ export function AssignmentForm({
     assessmentType: initial?.assessmentType ?? "assignment",
     dueDate: initial?.dueDate ?? toDateKey(new Date()),
     priority: initial?.priority ?? "medium",
+    status: initial?.status ?? (initial?.completed ? "done" : "todo"),
+    estimatedMinutes: initial?.estimatedMinutes ?? 45,
     notes: initial?.notes ?? "",
   });
   const [error, setError] = useState("");
@@ -48,6 +52,10 @@ export function AssignmentForm({
     }
     if (!form.course.trim()) {
       setError("Course is required");
+      return;
+    }
+    if (!Number.isFinite(form.estimatedMinutes) || form.estimatedMinutes <= 0) {
+      setError("Estimated time must be greater than zero");
       return;
     }
     onSubmit(form);
@@ -118,6 +126,37 @@ export function AssignmentForm({
             <option value="low">Low</option>
             <option value="medium">Medium</option>
             <option value="high">High</option>
+          </select>
+        </div>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Input
+          id="estimatedMinutes"
+          label="Estimated Time (minutes)"
+          type="number"
+          min={1}
+          step={5}
+          value={String(form.estimatedMinutes)}
+          onChange={(e) =>
+            setForm((f) => ({
+              ...f,
+              estimatedMinutes: Number.parseInt(e.target.value, 10) || 0,
+            }))
+          }
+        />
+        <div className="space-y-1.5">
+          <label htmlFor="status" className="block text-sm font-medium">
+            Status
+          </label>
+          <select
+            id="status"
+            value={form.status}
+            onChange={(e) => setForm((f) => ({ ...f, status: e.target.value as AssignmentStatus }))}
+            className="flex h-9 w-full rounded-lg border border-border bg-card px-3 text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
+          >
+            <option value="todo">To Do</option>
+            <option value="in-progress">In Progress</option>
+            <option value="done">Done</option>
           </select>
         </div>
       </div>

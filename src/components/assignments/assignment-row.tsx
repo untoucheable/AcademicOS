@@ -21,6 +21,7 @@ export function AssignmentRow({
   onDelete,
 }: AssignmentRowProps) {
   const overdue = !assignment.completed && isPastDue(assignment.dueDate);
+  const status = assignment.completed ? "done" : assignment.status ?? "todo";
 
   return (
     <tr className="group transition-colors hover:bg-muted/30">
@@ -51,9 +52,14 @@ export function AssignmentRow({
             <div className="mt-1 flex flex-wrap gap-2">
               <p className="text-sm text-muted-foreground">{assignment.course}</p>
               {assignment.assessmentType ? (
-                <Badge variant="accent" className="capitalize">
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   {assignment.assessmentType}
-                </Badge>
+                </span>
+              ) : null}
+              {typeof assignment.estimatedMinutes === "number" ? (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {assignment.estimatedMinutes} min
+                </span>
               ) : null}
             </div>
           </div>
@@ -73,6 +79,7 @@ export function AssignmentRow({
           <Badge variant={statusVariant(assignment.completed, overdue)}>
             {assignment.completed ? "Completed" : overdue ? "Overdue" : "Active"}
           </Badge>
+          <Badge>{status === "done" ? "Done" : status === "in-progress" ? "In Progress" : "To Do"}</Badge>
           <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
             <Button variant="ghost" size="icon" onClick={() => onEdit(assignment)} aria-label="Edit">
               <Pencil className="h-3.5 w-3.5" />

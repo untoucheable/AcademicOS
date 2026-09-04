@@ -7,7 +7,7 @@ export type AutomationProvider = {
   description: string;
   scopes: string[];
   capabilities: string[];
-  status: "mock-ready" | "planned";
+  status: "available" | "planned";
 };
 
 export const automationProviders: AutomationProvider[] = [
@@ -18,7 +18,7 @@ export const automationProviders: AutomationProvider[] = [
     description: "Import classes, assignments, due dates, teacher instructions, attachments, and available grades.",
     scopes: ["classes", "assignments", "announcements", "attachments", "grades"],
     capabilities: ["Assignment import", "Deadline detection", "Teacher instruction parsing"],
-    status: "mock-ready",
+    status: "available",
   },
   {
     provider: "brightspace",
@@ -27,7 +27,7 @@ export const automationProviders: AutomationProvider[] = [
     description: "Track course content, quizzes, tests, announcements, and deadline changes from learning platforms.",
     scopes: ["courses", "assignments", "quizzes", "announcements", "content"],
     capabilities: ["Quiz detection", "Course page monitoring", "Preparation time creation"],
-    status: "planned",
+    status: "available",
   },
   {
     provider: "gmail",
@@ -36,7 +36,7 @@ export const automationProviders: AutomationProvider[] = [
     description: "Find teacher announcements, changed due dates, missed communication, and academic reminders.",
     scopes: ["messages", "teacher-announcements", "deadlines", "schedule-changes"],
     capabilities: ["Email summaries", "Deadline extraction", "Missed update warnings"],
-    status: "mock-ready",
+    status: "planned",
   },
   {
     provider: "google-drive",
@@ -45,7 +45,7 @@ export const automationProviders: AutomationProvider[] = [
     description: "Use notes, PDFs, worksheets, slides, textbooks, and assignments to generate study material.",
     scopes: ["files", "notes", "pdfs", "presentations", "worksheets"],
     capabilities: ["Document summaries", "Flashcards", "Practice questions"],
-    status: "mock-ready",
+    status: "planned",
   },
   {
     provider: "website-scanner",
@@ -54,7 +54,7 @@ export const automationProviders: AutomationProvider[] = [
     description: "Monitor school websites, course pages, homework pages, and calendars for important changes.",
     scopes: ["announcements", "course-pages", "homework-pages", "calendar-pages"],
     capabilities: ["Uncertain finding review", "Confidence scoring", "Deadline monitoring"],
-    status: "mock-ready",
+    status: "planned",
   },
   {
     provider: "browser-extension",

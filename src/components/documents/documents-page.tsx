@@ -80,6 +80,7 @@ export function DocumentsPageContent() {
             {selectedId && (
               <DocumentEditor
                 id={selectedId}
+                canDelete={documents.length > 1}
                 onDelete={() => deleteDocument(selectedId)}
               />
             )}

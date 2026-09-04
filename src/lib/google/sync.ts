@@ -1,4 +1,4 @@
-import { ingestCalendarEvent } from "@/lib/ingestion";
+import { ingestCalendarEventWithReview } from "@/lib/intake-pipeline";
 import { syncIntegrationConnection } from "@/lib/sync-service";
 import type { StudentState } from "@/lib/student-state";
 
@@ -25,6 +25,7 @@ type SyncSummary = {
   updated: number;
   deleted: number;
   skipped: number;
+  reviewQueued: number;
 };
 
 export async function syncGoogleCalendarState(
@@ -40,6 +41,7 @@ export async function syncGoogleCalendarState(
     updated: 0,
     deleted: 0,
     skipped: 0,
+    reviewQueued: 0,
   };
 
   let nextState = state;
@@ -47,6 +49,13 @@ export async function syncGoogleCalendarState(
 
   for (const googleEvent of googleEvents) {
     if (!googleEvent.id) continue;
+
+    const resolvedKeys = new Set(nextState.resolvedCalendarEventKeys || []);
+    const googleEventKey = `google-calendar:${googleEvent.id}`;
+    if (resolvedKeys.has(googleEventKey)) {
+      summary.skipped += 1;
+      continue;
+    }
 
     if (googleEvent.status === "cancelled") {
       nextState = {
@@ -89,7 +98,7 @@ export async function syncGoogleCalendarState(
       continue;
     }
 
-    nextState = ingestCalendarEvent(nextState, {
+    const reviewed = ingestCalendarEventWithReview(nextState, {
       title: mapped.title,
       type: mapped.type,
       startTime: mapped.startTime,
@@ -106,9 +115,15 @@ export async function syncGoogleCalendarState(
           reason: "Imported from Google Calendar.",
           needsConfirmation: false,
         },
-        },
-      });
-    summary.imported += 1;
+      },
+    });
+
+    nextState = reviewed.state;
+    if (reviewed.imported) {
+      summary.imported += 1;
+    } else {
+      summary.reviewQueued += 1;
+    }
   }
 
   const syncedAt = new Date().toISOString();
@@ -126,8 +141,8 @@ export async function syncGoogleCalendarState(
   nextState = syncIntegrationConnection(
     nextState,
     "google-calendar",
-    `Google Calendar import complete: ${summary.imported} imported, ${summary.created} created, ${summary.updated} updated, ${summary.deleted} deleted.`,
-    summary.imported + summary.created + summary.updated + summary.deleted,
+    `Google Calendar import complete: ${summary.imported} imported, ${summary.reviewQueued} queued for review, ${summary.created} created, ${summary.updated} updated, ${summary.deleted} deleted.`,
+    summary.imported + summary.created + summary.updated + summary.deleted + summary.reviewQueued,
     "success",
     true,
   );

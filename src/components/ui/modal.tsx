@@ -42,7 +42,7 @@ export function Modal({ open, onClose, title, description, children, className }
         aria-modal
         aria-labelledby="modal-title"
         className={cn(
-          "relative z-10 w-full max-w-lg animate-in fade-in zoom-in-95 rounded-xl border border-border bg-card shadow-xl",
+          "relative z-10 flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col overflow-hidden animate-in fade-in zoom-in-95 rounded-xl border border-border bg-card shadow-xl",
           className,
         )}
       >
@@ -59,7 +59,7 @@ export function Modal({ open, onClose, title, description, children, className }
             <X className="h-4 w-4" />
           </Button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="flex-1 overflow-y-auto p-5">{children}</div>
       </div>
     </div>
   );

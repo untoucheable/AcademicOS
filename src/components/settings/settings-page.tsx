@@ -62,7 +62,6 @@ export function SettingsPageContent() {
     try {
       await resetAllData();
       setResetOpen(false);
-      setSaved(false);
     } finally {
       setIsResetting(false);
     }
@@ -232,7 +231,7 @@ export function SettingsPageContent() {
             <div>
               <p className="text-sm font-medium">Remove all saved information</p>
               <p className="text-sm text-muted-foreground">
-                This clears your assignments, notes, grades, goals, sessions, and synced planner data.
+                This clears assignments, notes, grades, goals, sessions, and synced planner data.
               </p>
             </div>
             <Button variant="danger" onClick={() => setResetOpen(true)}>
@@ -250,11 +249,11 @@ export function SettingsPageContent() {
         open={resetOpen}
         onClose={() => setResetOpen(false)}
         title="Reset everything?"
-        description="This will erase the current workspace from the app."
+        description="This will erase your current workspace from the app."
       >
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            Are you absolutely sure? This will remove your saved information and you will need to start over.
+            Are you absolutely sure? This removes all saved information and starts the workspace over.
           </p>
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={() => setResetOpen(false)}>

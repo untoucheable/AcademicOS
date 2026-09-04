@@ -48,7 +48,6 @@ export function AnalyticsPageContent() {
     prompt: "What went well today?",
     response: "",
   });
-  const [memoryFeedback, setMemoryFeedback] = useState<Record<string, "confirmed" | "rejected">>({});
 
   if (!isLoaded) return <LoadingScreen />;
 
@@ -66,32 +65,6 @@ export function AnalyticsPageContent() {
     .sort((a, b) => a.average - b.average);
   const weakest = gradeAverages[0];
   const strongest = [...gradeAverages].sort((a, b) => b.average - a.average)[0];
-  const memoryChecks = [
-    {
-      id: "hardest-subject",
-      label: "Hardest subject",
-      value: memory.hardestSubject || "Not enough data yet",
-      detail: "Does this look right?",
-    },
-    {
-      id: "best-time",
-      label: "Best study time",
-      value: memory.dailyPatterns[0]?.timeOfDay || "morning",
-      detail: "Does that match when you focus best?",
-    },
-    {
-      id: "session-length",
-      label: "Best session length",
-      value: `${memory.preferredStudySessionLength} minutes`,
-      detail: "Is this a good target for your study blocks?",
-    },
-    {
-      id: "burnout-threshold",
-      label: "Burnout threshold",
-      value: `${memory.burnoutThresholdHours} hours`,
-      detail: "Does this feel realistic before you start dragging?",
-    },
-  ];
 
   function submitStudySession() {
     if (!sessionForm.subject.trim()) return;
@@ -352,47 +325,6 @@ export function AnalyticsPageContent() {
                   <p className="text-xs font-medium uppercase text-muted-foreground">Burnout Threshold</p>
                   <p className="mt-1 text-sm">{memory.burnoutThresholdHours}h</p>
                 </div>
-              </div>
-            </Card>
-
-            <Card>
-              <div className="mb-4 flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-muted-foreground" />
-                <h2 className="font-semibold">Memory Check</h2>
-              </div>
-              <div className="space-y-3">
-                {memoryChecks.map((check) => (
-                  <div key={check.id} className="rounded-lg border border-border bg-background p-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-medium">{check.label}</p>
-                        <p className="mt-1 text-sm text-muted-foreground">{check.value}</p>
-                        <p className="mt-1 text-xs text-muted-foreground">{check.detail}</p>
-                      </div>
-                      {memoryFeedback[check.id] ? (
-                        <Badge variant={memoryFeedback[check.id] === "confirmed" ? "success" : "warning"}>
-                          {memoryFeedback[check.id]}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <div className="mt-3 flex gap-2">
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => setMemoryFeedback((prev) => ({ ...prev, [check.id]: "confirmed" }))}
-                      >
-                        Yes, that&apos;s right
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setMemoryFeedback((prev) => ({ ...prev, [check.id]: "rejected" }))}
-                      >
-                        Not quite
-                      </Button>
-                    </div>
-                  </div>
-                ))}
               </div>
             </Card>
           </div>

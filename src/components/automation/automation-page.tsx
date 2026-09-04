@@ -32,7 +32,7 @@ type ProviderStatus = {
   description: string;
   scopes: string[];
   capabilities: string[];
-  status: "mock-ready" | "planned";
+  status: "available" | "planned";
   permission: {
     enabled: boolean;
     scopes: string[];
@@ -69,6 +69,17 @@ type GoogleCalendarStatus = {
   latestError: string | null;
 };
 
+type IntegrationStatus = {
+  connected: boolean;
+  accountEmail: string | null;
+  accountName?: string | null;
+  grantedScopes: string[];
+  lastSyncAt: string | null;
+  tokenExpiryStatus: string;
+  tokenExpiresAt: string | null;
+  latestError: string | null;
+};
+
 const categoryIcons = {
   school: GraduationCap,
   communication: Inbox,
@@ -89,10 +100,16 @@ function usageTotal(provider: ProviderStatus) {
 export function AutomationPageContent() {
   const [overview, setOverview] = useState<AutomationOverview | null>(null);
   const [googleStatus, setGoogleStatus] = useState<GoogleCalendarStatus | null>(null);
+  const [classroomStatus, setClassroomStatus] = useState<IntegrationStatus | null>(null);
+  const [brightspaceStatus, setBrightspaceStatus] = useState<IntegrationStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [googleLoading, setGoogleLoading] = useState(true);
+  const [classroomLoading, setClassroomLoading] = useState(true);
+  const [brightspaceLoading, setBrightspaceLoading] = useState(true);
   const [updatingProvider, setUpdatingProvider] = useState<string | null>(null);
   const [googleBusy, setGoogleBusy] = useState(false);
+  const [classroomBusy, setClassroomBusy] = useState(false);
+  const [brightspaceBusy, setBrightspaceBusy] = useState(false);
   const [error, setError] = useState("");
 
   const loadOverview = useCallback(async () => {
@@ -134,6 +151,46 @@ export function AutomationPageContent() {
     }
   }, []);
 
+  const loadClassroomStatus = useCallback(async () => {
+    setClassroomLoading(true);
+
+    try {
+      const res = await fetch("/api/integrations/google/classroom/status");
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Google Classroom status failed to load.");
+      }
+
+      setClassroomStatus(data);
+    } catch (err) {
+      setClassroomStatus(null);
+      setError(err instanceof Error ? err.message : "Google Classroom status failed to load.");
+    } finally {
+      setClassroomLoading(false);
+    }
+  }, []);
+
+  const loadBrightspaceStatus = useCallback(async () => {
+    setBrightspaceLoading(true);
+
+    try {
+      const res = await fetch("/api/integrations/brightspace/status");
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Brightspace status failed to load.");
+      }
+
+      setBrightspaceStatus(data);
+    } catch (err) {
+      setBrightspaceStatus(null);
+      setError(err instanceof Error ? err.message : "Brightspace status failed to load.");
+    } finally {
+      setBrightspaceLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
@@ -141,6 +198,14 @@ export function AutomationPageContent() {
   useEffect(() => {
     void loadGoogleStatus();
   }, [loadGoogleStatus]);
+
+  useEffect(() => {
+    void loadClassroomStatus();
+  }, [loadClassroomStatus]);
+
+  useEffect(() => {
+    void loadBrightspaceStatus();
+  }, [loadBrightspaceStatus]);
 
   const enabledCount = useMemo(
     () => overview?.providers.filter((provider) => provider.permission.enabled).length || 0,
@@ -234,6 +299,87 @@ export function AutomationPageContent() {
     }
   }
 
+  async function handleClassroomSync() {
+    setClassroomBusy(true);
+    setError("");
+
+    try {
+      const res = await fetch("/api/integrations/google/classroom/sync", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Google Classroom sync failed.");
+      }
+
+      await loadClassroomStatus();
+      await loadOverview();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Google Classroom sync failed.");
+    } finally {
+      setClassroomBusy(false);
+    }
+  }
+
+  async function handleBrightspaceConnect() {
+    window.location.assign("/api/integrations/brightspace/oauth/start");
+  }
+
+  async function handleBrightspaceSync() {
+    setBrightspaceBusy(true);
+    setError("");
+
+    try {
+      const res = await fetch("/api/integrations/brightspace/sync", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Brightspace sync failed.");
+      }
+
+      await loadBrightspaceStatus();
+      await loadOverview();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Brightspace sync failed.");
+    } finally {
+      setBrightspaceBusy(false);
+    }
+  }
+
+  async function handleBrightspaceDisconnect() {
+    setBrightspaceBusy(true);
+    setError("");
+
+    try {
+      const res = await fetch("/api/integrations/brightspace/oauth/disconnect", {
+        method: "POST",
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Brightspace disconnect failed.");
+      }
+
+      await loadBrightspaceStatus();
+      await loadOverview();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Brightspace disconnect failed.");
+    } finally {
+      setBrightspaceBusy(false);
+    }
+  }
+
   if (isLoading) return <LoadingScreen />;
 
   return (
@@ -321,6 +467,112 @@ export function AutomationPageContent() {
           </div>
         </section>
 
+        <section className="grid gap-4 lg:grid-cols-2">
+          <article className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+            <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+              <div>
+                <h2 className="font-semibold">Google Classroom</h2>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Import coursework and announcements from your Google Classroom classes.
+                </p>
+              </div>
+              <Badge variant={classroomStatus?.connected ? "success" : "default"}>
+                {classroomStatus?.connected ? "Connected" : "Disconnected"}
+              </Badge>
+            </div>
+
+            <div className="space-y-3 p-5">
+              <div className="rounded-lg border border-border bg-background p-4">
+                <p className="text-xs font-medium uppercase text-muted-foreground">Account</p>
+                <p className="mt-2 font-medium">
+                  {classroomLoading ? "Loading..." : classroomStatus?.accountEmail || "No Google account connected"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Token status: {classroomStatus?.tokenExpiryStatus || "disconnected"}
+                </p>
+              </div>
+              <div className="rounded-lg border border-border bg-background p-4">
+                <p className="text-xs font-medium uppercase text-muted-foreground">Last import</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {classroomStatus?.lastSyncAt || "No import yet"}
+                </p>
+              </div>
+              {classroomStatus?.latestError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                  {classroomStatus.latestError}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={handleGoogleConnect} disabled={googleBusy}>
+                  <PlugZap className="h-4 w-4" />
+                  Connect Google
+                </Button>
+                <Button variant="secondary" onClick={handleClassroomSync} disabled={classroomBusy || !classroomStatus?.connected}>
+                  <RefreshCw className="h-4 w-4" />
+                  Import now
+                </Button>
+                <Button variant="secondary" onClick={handleGoogleDisconnect} disabled={googleBusy || !classroomStatus?.connected}>
+                  <Unplug className="h-4 w-4" />
+                  Disconnect Google
+                </Button>
+              </div>
+            </div>
+          </article>
+
+          <article className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+            <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+              <div>
+                <h2 className="font-semibold">D2L / Brightspace</h2>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Import course news and deadline signals from Brightspace.
+                </p>
+              </div>
+              <Badge variant={brightspaceStatus?.connected ? "success" : "default"}>
+                {brightspaceStatus?.connected ? "Connected" : "Disconnected"}
+              </Badge>
+            </div>
+
+            <div className="space-y-3 p-5">
+              <div className="rounded-lg border border-border bg-background p-4">
+                <p className="text-xs font-medium uppercase text-muted-foreground">Account</p>
+                <p className="mt-2 font-medium">
+                  {brightspaceLoading
+                    ? "Loading..."
+                    : brightspaceStatus?.accountName || brightspaceStatus?.accountEmail || "No Brightspace account connected"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Token status: {brightspaceStatus?.tokenExpiryStatus || "disconnected"}
+                </p>
+              </div>
+              <div className="rounded-lg border border-border bg-background p-4">
+                <p className="text-xs font-medium uppercase text-muted-foreground">Last import</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {brightspaceStatus?.lastSyncAt || "No import yet"}
+                </p>
+              </div>
+              {brightspaceStatus?.latestError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                  {brightspaceStatus.latestError}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={handleBrightspaceConnect} disabled={brightspaceBusy}>
+                  <PlugZap className="h-4 w-4" />
+                  Connect
+                </Button>
+                <Button variant="secondary" onClick={handleBrightspaceSync} disabled={brightspaceBusy || !brightspaceStatus?.connected}>
+                  <RefreshCw className="h-4 w-4" />
+                  Import now
+                </Button>
+                <Button variant="secondary" onClick={handleBrightspaceDisconnect} disabled={brightspaceBusy || !brightspaceStatus?.connected}>
+                  <Unplug className="h-4 w-4" />
+                  Disconnect
+                </Button>
+              </div>
+            </div>
+          </article>
+        </section>
+
         <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
             {
@@ -403,8 +655,8 @@ export function AutomationPageContent() {
                             <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
                                 <h4 className="font-medium">{provider.label}</h4>
-                                <Badge variant={provider.status === "mock-ready" ? "success" : "default"}>
-                                  {provider.status === "mock-ready" ? "Demo ready" : "Planned"}
+                                <Badge variant={provider.status === "available" ? "success" : "default"}>
+                                  {provider.status === "available" ? "Available" : "Planned"}
                                 </Badge>
                               </div>
                               <p className="mt-2 text-sm text-muted-foreground">

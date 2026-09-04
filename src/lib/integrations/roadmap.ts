@@ -45,10 +45,10 @@ export const integrationRoadmap: IntegrationRoadmapItem[] = [
   {
     provider: "d2l",
     name: "D2L / Brightspace",
-    phase: "next",
+    phase: "now",
     auth: "oauth",
     access: "read-only",
-    notes: "Adapter-first support with a mock provider until credentials are available.",
+    notes: "Import courses, announcements, and deadline signals from Brightspace.",
   },
   {
     provider: "browser-extension",

@@ -89,6 +89,20 @@ export type ActivityItem = {
 
 export type EnergyLevel = "high" | "medium" | "low";
 
+export type DailyPlanTemplateId =
+  | "training-day"
+  | "refereeing-day"
+  | "late-practice-day"
+  | "early-practice-day";
+
+export type DailyMissionPlan = {
+  date: string;
+  templateId: DailyPlanTemplateId;
+  energyLevel: EnergyLevel;
+  majorUpdates: string;
+  updatedAt: string;
+};
+
 export type PlanItem = {
   id: string;
   title: string;

@@ -37,7 +37,6 @@ export function AssignmentsPageContent() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Assignment | null>(null);
   const [showDateFilter, setShowDateFilter] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Assignment | null>(null);
 
   if (!isLoaded) return <LoadingScreen />;
 
@@ -56,6 +55,13 @@ export function AssignmentsPageContent() {
   function closeModal() {
     setModalOpen(false);
     setEditing(null);
+  }
+
+  function handleDelete(id: string) {
+    const assignment = assignments.find((item) => item.id === id);
+    const label = assignment ? `"${assignment.title}"` : "this assignment";
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    deleteAssignment(id);
   }
 
   return (
@@ -151,7 +157,7 @@ export function AssignmentsPageContent() {
                     assignment={assignment}
                     onToggleComplete={toggleAssignmentComplete}
                     onEdit={openEdit}
-                    onDelete={(id) => setDeleteTarget(assignments.find((item) => item.id === id) || null)}
+                    onDelete={handleDelete}
                   />
                 ))}
               </tbody>
@@ -179,34 +185,6 @@ export function AssignmentsPageContent() {
             closeModal();
           }}
         />
-      </Modal>
-
-      <Modal
-        open={Boolean(deleteTarget)}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete assignment?"
-        description="This will remove the assignment from AcademicOS."
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Are you sure you want to delete {deleteTarget?.title || "this assignment"}?
-          </p>
-          <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                if (!deleteTarget) return;
-                deleteAssignment(deleteTarget.id);
-                setDeleteTarget(null);
-              }}
-            >
-              Delete
-            </Button>
-          </div>
-        </div>
       </Modal>
     </>
   );

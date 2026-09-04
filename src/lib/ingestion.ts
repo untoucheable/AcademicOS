@@ -1,5 +1,5 @@
 import { AcademicSource, SourceConfidence } from "./academic-core";
-import { Assignment, AssignmentPriority } from "./assignment";
+import { Assignment, AssignmentAssessmentType, AssignmentPriority } from "./assignment";
 import { CalendarEvent, CalendarEventType } from "./calendar";
 import { SchoolDocument } from "./documents";
 import { emitDomainEvent } from "./domain-events";
@@ -14,9 +14,9 @@ export type IngestedAssignment = IngestedBase & {
   title: string;
   course: string;
   subject?: string;
-  assessmentType?: Assignment["assessmentType"];
   dueDate: string;
   priority?: AssignmentPriority;
+  assessmentType?: AssignmentAssessmentType;
   notes?: string;
   description?: string;
   estimatedMinutes?: number;

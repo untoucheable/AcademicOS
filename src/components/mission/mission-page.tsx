@@ -1,15 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { RefreshCw, Timer } from "lucide-react";
+import { CalendarDays, Flame, RefreshCw, Sparkles, Timer } from "lucide-react";
 import { Header } from "@/components/header";
+import { useApp } from "@/components/providers/app-provider";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Modal } from "@/components/ui/modal";
 import { LoadingScreen } from "@/components/ui/loading";
+import { Modal } from "@/components/ui/modal";
 import { Mission, sortMissionSchedule } from "@/lib/mission";
+import {
+  buildDailyPlanEvents,
+  buildDailyPlanPreview,
+  getDailyPlanTemplates,
+  getDefaultDailyPlanTemplateId,
+} from "@/lib/daily-plans";
+import type { DailyMissionPlan, DailyPlanTemplateId, EnergyLevel } from "@/lib/types";
 
 type ReviewItem = {
   id: string;
@@ -21,14 +28,6 @@ type ReviewItem = {
     needsConfirmation: boolean;
   };
 };
-
-function isAssessmentTitle(title: string) {
-  return /\b(test|quiz|exam)\b/i.test(title);
-}
-
-function stripAssessmentWords(title: string) {
-  return title.replace(/\b(test|quiz|exam)\b/gi, "").replace(/\s+/g, " ").trim();
-}
 
 function toLocalISOString(date: Date) {
   const offsetMinutes = -date.getTimezoneOffset();
@@ -58,20 +57,33 @@ function toLocalISOString(date: Date) {
 }
 
 export function MissionPageContent() {
+  const { isLoaded, dailyMissionPlan, currentMission, setDailyMissionPlan } = useApp();
   const [input, setInput] = useState("");
   const [mission, setMission] = useState<Mission | null>(null);
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [hideTarget, setHideTarget] = useState<{ id: string; title: string } | null>(null);
-  const hasGeneratedInitialMission = useRef(false);
+  const [planPromptOpen, setPlanPromptOpen] = useState(false);
+  const [majorUpdates, setMajorUpdates] = useState("");
+  const [energyLevel, setEnergyLevel] = useState<EnergyLevel>("medium");
+  const [templateId, setTemplateId] = useState<DailyPlanTemplateId>("training-day");
+  const hasLoadedInitialMission = useRef(false);
+  const todayKey = useMemo(() => toLocalISOString(new Date()).slice(0, 10), []);
   const orderedSchedule = sortMissionSchedule(mission?.schedule || []);
+  const planPreview = useMemo(() => buildDailyPlanPreview(dailyMissionPlan), [dailyMissionPlan]);
+  const basePlanEvents = useMemo(
+    () => buildDailyPlanEvents(dailyMissionPlan, toLocalISOString(new Date())),
+    [dailyMissionPlan],
+  );
+  const displaySchedule = orderedSchedule.length ? orderedSchedule : basePlanEvents;
+  const templateOptions = useMemo(() => getDailyPlanTemplates(), []);
 
-  function priorityVariant(priority?: number) {
-    if ((priority ?? 0) >= 8) return "danger" as const;
-    if ((priority ?? 0) >= 5) return "warning" as const;
-    return "success" as const;
-  }
+  useEffect(() => {
+    if (currentMission) {
+      setMission(currentMission);
+    }
+  }, [currentMission]);
 
   const loadReviewItems = useCallback(async () => {
     const res = await fetch("/api/review");
@@ -115,73 +127,25 @@ export function MissionPageContent() {
   }, []);
 
   useEffect(() => {
-    if (hasGeneratedInitialMission.current) return;
-    hasGeneratedInitialMission.current = true;
-    void generateMission("");
+    if (!isLoaded) return;
     void loadReviewItems();
-  }, [generateMission, loadReviewItems]);
+  }, [isLoaded, loadReviewItems]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (hasLoadedInitialMission.current) return;
+
+    setMajorUpdates(dailyMissionPlan?.majorUpdates || "");
+    setEnergyLevel(dailyMissionPlan?.energyLevel || "medium");
+    setTemplateId(
+      dailyMissionPlan?.templateId || getDefaultDailyPlanTemplateId(dailyMissionPlan?.energyLevel),
+    );
+    setPlanPromptOpen(true);
+  }, [dailyMissionPlan, generateMission, isLoaded, todayKey]);
 
   async function handleSubmit() {
     await generateMission(input);
     setInput("");
-  }
-
-  async function runMockImport(path: string, context: string) {
-    setIsLoading(true);
-    setError("");
-
-    try {
-      const now = new Date();
-      const res = await fetch(path, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          currentTime: toLocalISOString(now),
-        }),
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Import failed.");
-      }
-
-      await generateMission(context);
-      await loadReviewItems();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Import failed.");
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  async function handleMockClassroomImport() {
-    await runMockImport(
-      "/api/integrations/mock-classroom",
-      "Imported classroom assignments. Rebuild today's mission from confirmed academic data."
-    );
-  }
-
-  async function handleMockEmailImport() {
-    await runMockImport(
-      "/api/integrations/mock-email",
-      "Imported a teacher email update. Rebuild today's mission from confirmed academic data."
-    );
-  }
-
-  async function handleMockDocumentImport() {
-    await runMockImport(
-      "/api/integrations/mock-documents",
-      "Imported study notes. Rebuild today's mission from confirmed academic material."
-    );
-  }
-
-  async function handleMockWebsiteScan() {
-    await runMockImport(
-      "/api/integrations/mock-website-scan",
-      "Scanned a school website. Review uncertain findings before changing today's mission."
-    );
   }
 
   async function handleReviewAction(reviewId: string, action: "approve" | "dismiss") {
@@ -214,7 +178,7 @@ export function MissionPageContent() {
     }
   }
 
-  async function handleHideFromMission(eventId: string) {
+  async function handleRemoveEvent(eventId: string) {
     setIsLoading(true);
     setError("");
 
@@ -232,7 +196,11 @@ export function MissionPageContent() {
         throw new Error(data.error || "Mission update failed.");
       }
 
-      setMission(data);
+      if (data.currentMission) {
+        setMission(data.currentMission);
+      } else {
+        await generateMission(input);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Mission update failed.");
     } finally {
@@ -242,24 +210,41 @@ export function MissionPageContent() {
 
   async function handleConfirmHide() {
     if (!hideTarget) return;
-    await handleHideFromMission(hideTarget.id);
+    await handleRemoveEvent(hideTarget.id);
     setHideTarget(null);
   }
 
-  const normalizedReview = orderedSchedule.map((event) => {
-    if (!mission) return event;
-    if (!isAssessmentTitle(event.title)) return event;
-
-    const prepTitle = `Prepare for ${stripAssessmentWords(event.title) || event.title}`;
-    return {
-      ...event,
-      type: "study" as const,
-      title: prepTitle,
-      priority: Math.max(event.priority, 7),
+  async function handleSaveDailyPlan() {
+    const nextPlan: DailyMissionPlan = {
+      date: todayKey,
+      templateId,
+      energyLevel,
+      majorUpdates: majorUpdates.trim(),
+      updatedAt: new Date().toISOString(),
     };
-  });
 
-  if (isLoading && !mission) return <LoadingScreen />;
+    await setDailyMissionPlan(nextPlan);
+    setPlanPromptOpen(false);
+    hasLoadedInitialMission.current = true;
+    await generateMission(nextPlan.majorUpdates);
+  }
+
+  async function handleUsePlanWithoutChanges() {
+    const nextPlan: DailyMissionPlan = {
+      date: todayKey,
+      templateId: dailyMissionPlan?.templateId || templateId,
+      energyLevel: dailyMissionPlan?.energyLevel || energyLevel,
+      majorUpdates: dailyMissionPlan?.majorUpdates || majorUpdates.trim(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await setDailyMissionPlan(nextPlan);
+    setPlanPromptOpen(false);
+    hasLoadedInitialMission.current = true;
+    await generateMission(nextPlan.majorUpdates);
+  }
+
+  if (!isLoaded || (isLoading && !mission && !planPromptOpen)) return <LoadingScreen />;
 
   return (
     <>
@@ -267,9 +252,9 @@ export function MissionPageContent() {
         title="Mission"
         description="The AI planner that turns confirmed events into today's path."
         action={
-          <Button variant="secondary" onClick={() => void generateMission(input)}>
-            <RefreshCw className="h-4 w-4" />
-            Rebuild
+          <Button variant="secondary" onClick={() => setPlanPromptOpen(true)}>
+            <CalendarDays className="h-4 w-4" />
+            Edit Day Plan
           </Button>
         }
       />
@@ -277,21 +262,23 @@ export function MissionPageContent() {
       <main className="space-y-6 p-6">
         <section className="grid gap-4 md:grid-cols-3">
           <Card>
-            <p className="text-xs font-medium uppercase text-muted-foreground">Live replanning</p>
+            <p className="text-xs font-medium uppercase text-muted-foreground">Today&apos;s Plan</p>
             <p className="mt-2 text-sm text-muted-foreground">
-              Refresh the plan as assignments, emails, or calendar events change.
+              {planPreview ? planPreview.templateName : "Choose a base routine to shape today's plan."}
             </p>
           </Card>
           <Card>
-            <p className="text-xs font-medium uppercase text-muted-foreground">Focus timer</p>
+            <p className="text-xs font-medium uppercase text-muted-foreground">Energy Check</p>
             <p className="mt-2 text-sm text-muted-foreground">
-              Start a study block when the plan is ready.
+              {planPreview
+                ? `Today is marked as ${planPreview.energyMode}.`
+                : "Tell AcademicOS how much energy you have."}
             </p>
           </Card>
           <Card>
-            <p className="text-xs font-medium uppercase text-muted-foreground">Finish session</p>
+            <p className="text-xs font-medium uppercase text-muted-foreground">Major Updates</p>
             <p className="mt-2 text-sm text-muted-foreground">
-              Mark completed work and keep the mission aligned with the day.
+              {dailyMissionPlan?.majorUpdates?.trim() || "No major updates saved for today."}
             </p>
           </Card>
         </section>
@@ -305,51 +292,61 @@ export function MissionPageContent() {
         <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
           <article className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
             <div className="border-b border-border px-5 py-4">
-              <h2 className="font-semibold">Today&apos;s Mission Plan</h2>
+              <h2 className="font-semibold">Today&apos;s Plan</h2>
               <p className="text-sm text-muted-foreground">
-                What should happen next, in chronological order.
+                One live plan, shaped from your base routine and today&apos;s edits.
               </p>
             </div>
 
-            {normalizedReview.length ? (
+            {displaySchedule.length ? (
               <ul className="divide-y divide-border">
-                {normalizedReview.map((event) => (
-                  <li key={event.id} className="px-5 py-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="font-medium">{event.title}</p>
-                        <p className="text-sm text-muted-foreground">{event.type}</p>
-                        <p className="mt-2 text-xs text-muted-foreground">
-                          {new Date(event.startTime).toLocaleTimeString([], {
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}
-                          {" - "}
-                          {new Date(event.endTime).toLocaleTimeString([], {
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}
-                        </p>
-                        <div className="mt-2">
-                          <Badge variant={priorityVariant(event.priority)}>
-                            Priority {event.priority}
-                          </Badge>
+                {displaySchedule.map((event) => {
+                  const isBasePlanEvent = event.id.startsWith("daily-plan:");
+                  const isAddedWork = event.source === "ai" && !isBasePlanEvent;
+                  const tag = isBasePlanEvent
+                    ? "Base block"
+                    : isAddedWork
+                      ? "Added work"
+                      : event.source === "manual"
+                        ? "Fixed event"
+                        : "Plan item";
+
+                  return (
+                    <li key={event.id} className="px-5 py-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-medium">{event.title}</p>
+                          <p className="text-sm text-muted-foreground">{event.type}</p>
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            {new Date(event.startTime).toLocaleTimeString([], {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })}
+                            {" - "}
+                            {new Date(event.endTime).toLocaleTimeString([], {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })}
+                          </p>
+                        </div>
+                        <div className="flex flex-col items-end gap-2">
+                          <span className="text-xs font-medium uppercase text-muted-foreground">{tag}</span>
+                          <button
+                            type="button"
+                            onClick={() => setHideTarget({ id: event.id, title: event.title })}
+                            disabled={isLoading}
+                            className="text-xs text-red-600 hover:text-red-700 disabled:opacity-50"
+                          >
+                            Hide from Plan
+                          </button>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setHideTarget({ id: event.id, title: event.title })}
-                        disabled={isLoading}
-                        className="text-xs text-red-600 hover:text-red-700 disabled:opacity-50"
-                      >
-                        Hide from Mission
-                      </button>
-                    </div>
-                  </li>
-                ))}
+                    </li>
+                  );
+                })}
               </ul>
             ) : (
-              <p className="px-5 py-8 text-sm text-muted-foreground">No schedule generated yet.</p>
+              <p className="px-5 py-8 text-sm text-muted-foreground">No plan generated yet.</p>
             )}
           </article>
 
@@ -416,7 +413,9 @@ export function MissionPageContent() {
           <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
             <div className="border-b border-border px-5 py-4">
               <h2 className="font-semibold">Needs Confirmation</h2>
-              <p className="text-sm text-muted-foreground">Review uncertain imported items before applying them.</p>
+              <p className="text-sm text-muted-foreground">
+                Review uncertain imported items before applying them.
+              </p>
             </div>
             <ul className="divide-y divide-border">
               {reviewItems.map((item) => (
@@ -424,8 +423,8 @@ export function MissionPageContent() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="font-medium">{item.title}</div>
-                      <div className="text-sm text-muted-foreground mt-1">{item.reason}</div>
-                      <div className="text-xs text-muted-foreground mt-2">
+                      <div className="mt-1 text-sm text-muted-foreground">{item.reason}</div>
+                      <div className="mt-2 text-xs text-muted-foreground">
                         Confidence: {Math.round(item.confidence.score * 100)}%
                       </div>
                     </div>
@@ -454,30 +453,6 @@ export function MissionPageContent() {
           </section>
         ) : null}
 
-      <Modal
-        open={Boolean(hideTarget)}
-        onClose={() => setHideTarget(null)}
-        title="Hide this mission item?"
-        description="This removes it from the mission plan without deleting the underlying calendar item."
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Are you sure you want to hide {hideTarget?.title || "this item"}?
-          </p>
-          <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => setHideTarget(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => void handleConfirmHide()}
-            >
-              Hide
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
         <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
           <div className="border-b border-border px-5 py-4">
             <h2 className="font-semibold">Quick Update</h2>
@@ -494,22 +469,107 @@ export function MissionPageContent() {
               <Button onClick={() => void handleSubmit()} disabled={isLoading}>
                 Update Mission
               </Button>
-              <Button variant="secondary" onClick={handleMockClassroomImport} disabled={isLoading}>
-                Import Demo Classroom
-              </Button>
-              <Button variant="secondary" onClick={handleMockEmailImport} disabled={isLoading}>
-                Import Demo Email
-              </Button>
-              <Button variant="secondary" onClick={handleMockDocumentImport} disabled={isLoading}>
-                Import Demo Notes
-              </Button>
-              <Button variant="secondary" onClick={handleMockWebsiteScan} disabled={isLoading}>
-                Scan Demo Website
-              </Button>
+              <Link href="/integrations">
+                <Button variant="secondary">Manage Integrations</Button>
+              </Link>
             </div>
           </div>
         </section>
       </main>
+
+      <Modal
+        open={planPromptOpen}
+        onClose={() => void handleUsePlanWithoutChanges()}
+        title="Edit today's plan"
+        description="Tell AcademicOS whether anything major changed, then choose the routine that becomes today's plan."
+      >
+        <div className="space-y-5">
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-foreground">Any major updates?</p>
+            <textarea
+              value={majorUpdates}
+              onChange={(e) => setMajorUpdates(e.target.value)}
+              className="min-h-24 w-full rounded-lg border border-border bg-background p-3 text-sm"
+              placeholder="New tests, schedule changes, tired, busy, etc."
+            />
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-foreground">Energy level</p>
+            <div className="flex flex-wrap gap-2">
+              {(["low", "medium", "high"] as EnergyLevel[]).map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  onClick={() => setEnergyLevel(level)}
+                  className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                    energyLevel === level
+                      ? "bg-accent text-accent-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-muted/70"
+                  }`}
+                >
+                  {level}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-foreground">Starting routine</p>
+            <div className="grid gap-2">
+              {templateOptions.map((template) => (
+                <button
+                  key={template.id}
+                  type="button"
+                  onClick={() => setTemplateId(template.id)}
+                  className={`rounded-lg border px-4 py-3 text-left transition-colors ${
+                    templateId === template.id
+                      ? "border-accent bg-accent/10"
+                      : "border-border bg-background hover:bg-muted/40"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-medium">{template.name}</span>
+                    <Sparkles className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">{template.description}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+              <Button variant="secondary" onClick={() => void handleUsePlanWithoutChanges()}>
+              Keep Current Plan
+            </Button>
+            <Button onClick={() => void handleSaveDailyPlan()}>
+              <Flame className="h-4 w-4" />
+              Send
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(hideTarget)}
+        onClose={() => setHideTarget(null)}
+        title="Hide this item?"
+        description="This removes it from the mission plan without deleting the underlying source data."
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to hide {hideTarget?.title || "this item"} from the mission?
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setHideTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={() => void handleConfirmHide()}>
+              Hide
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </>
   );
 }

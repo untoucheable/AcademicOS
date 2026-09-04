@@ -1,7 +1,36 @@
-import { defaultStudentState } from "@/lib/default-state";
 import { writeDatabase } from "@/lib/database";
+import { defaultStudentState } from "@/lib/default-state";
 import { updateState } from "@/lib/server-state";
 import { emitDomainEvent } from "@/lib/domain-events";
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json().catch(() => ({}));
+
+    if (body?.action !== "reset-all") {
+      return Response.json(
+        { error: "Unsupported action" },
+        { status: 400 }
+      );
+    }
+
+    writeDatabase({
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      state: defaultStudentState,
+      events: [],
+    });
+
+    return Response.json({ ok: true });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Reset failed";
+
+    return Response.json(
+      { error: message },
+      { status: 500 }
+    );
+  }
+}
 
 export async function PATCH(req: Request) {
   try {
@@ -87,28 +116,5 @@ export async function PATCH(req: Request) {
       { error: message },
       { status: 500 }
     );
-  }
-}
-
-export async function POST(req: Request) {
-  try {
-    const body = await req.json();
-
-    if (body?.action !== "reset-all") {
-      return Response.json({ error: "Unsupported action." }, { status: 400 });
-    }
-
-    writeDatabase({
-      schemaVersion: 1,
-      updatedAt: new Date().toISOString(),
-      state: defaultStudentState,
-      events: [],
-    });
-
-    return Response.json({ ok: true });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Reset failed";
-
-    return Response.json({ error: message }, { status: 500 });
   }
 }

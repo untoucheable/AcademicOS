@@ -1,5 +1,22 @@
 import type { StudentState } from "./student-state";
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mergeObject<T extends Record<string, unknown>>(base: T, value: unknown): T {
+  if (!isPlainObject(value)) return base;
+  return { ...base, ...value } as T;
+}
+
+function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function asNullableObject<T extends Record<string, unknown>>(value: unknown): T | null {
+  return isPlainObject(value) ? (value as T) : null;
+}
+
 export const defaultStudentState: StudentState = {
   profile: {
     name: "",
@@ -28,9 +45,14 @@ export const defaultStudentState: StudentState = {
   studySessions: [],
   reflections: [],
   goals: [],
+  dailyMissionPlan: null,
+  calendarFollowUpQueue: [],
+  resolvedCalendarEventKeys: [],
+  missionHiddenEventTitles: [],
 
   currentMission: null,
   missionHistory: [],
+  missionHiddenEventIds: [],
 
   memory: {
     hardestSubject: "",
@@ -52,40 +74,35 @@ export const defaultStudentState: StudentState = {
   notifications: [],
   dailyBriefings: [],
   ingestionReviewQueue: [],
-  missionHiddenEventIds: [],
 };
 
 export function mergeWithDefaultState(value: Partial<StudentState>): StudentState {
   return {
     ...defaultStudentState,
     ...value,
-    profile: {
-      ...defaultStudentState.profile,
-      ...value.profile,
-    },
-    status: {
-      ...defaultStudentState.status,
-      ...value.status,
-    },
-    memory: {
-      ...defaultStudentState.memory,
-      ...value.memory,
-    },
-    assignments: value.assignments || [],
-    courses: value.courses || [],
-    calendar: value.calendar || [],
-    documents: value.documents || [],
-    grades: value.grades || [],
-    studySessions: value.studySessions || [],
-    reflections: value.reflections || [],
-    goals: value.goals || [],
-    missionHistory: value.missionHistory || [],
-    integrationPermissions: value.integrationPermissions || [],
-    integrations: value.integrations || [],
-    academicSignals: value.academicSignals || [],
-    notifications: value.notifications || [],
-    dailyBriefings: value.dailyBriefings || [],
-    ingestionReviewQueue: value.ingestionReviewQueue || [],
-    missionHiddenEventIds: value.missionHiddenEventIds || [],
+    profile: mergeObject(defaultStudentState.profile, value.profile),
+    status: mergeObject(defaultStudentState.status, value.status),
+    memory: mergeObject(defaultStudentState.memory, value.memory),
+    assignments: asArray(value.assignments),
+    courses: asArray(value.courses),
+    calendar: asArray(value.calendar),
+    documents: asArray(value.documents),
+    grades: asArray(value.grades),
+    studySessions: asArray(value.studySessions),
+    reflections: asArray(value.reflections),
+    goals: asArray(value.goals),
+    dailyMissionPlan: asNullableObject(value.dailyMissionPlan),
+    calendarFollowUpQueue: asArray(value.calendarFollowUpQueue),
+    resolvedCalendarEventKeys: asArray(value.resolvedCalendarEventKeys),
+    missionHiddenEventTitles: asArray(value.missionHiddenEventTitles),
+    currentMission: asNullableObject(value.currentMission),
+    missionHistory: asArray(value.missionHistory),
+    missionHiddenEventIds: asArray(value.missionHiddenEventIds),
+    integrationPermissions: asArray(value.integrationPermissions),
+    integrations: asArray(value.integrations),
+    academicSignals: asArray(value.academicSignals),
+    notifications: asArray(value.notifications),
+    dailyBriefings: asArray(value.dailyBriefings),
+    ingestionReviewQueue: asArray(value.ingestionReviewQueue),
   };
 }

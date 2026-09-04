@@ -7,8 +7,9 @@ import { Mission } from "./mission";
 import { AcademicSignal, IntegrationPermission } from "./academic-core";
 import { IngestionReviewItem } from "./ingestion";
 import { DailyBriefing } from "./intelligence";
-import { AcademicGoal, ReflectionEntry, StudySession } from "./types";
+import { AcademicGoal, DailyMissionPlan, ReflectionEntry, StudySession } from "./types";
 import { AcademicNotification, Course, IntegrationConnection } from "./academic-graph";
+import type { CalendarFollowUpItem } from "./calendar-followups";
 
 export type StudentState = {
     profile: {
@@ -45,9 +46,19 @@ export type StudentState = {
 
     goals: AcademicGoal[];
 
+    dailyMissionPlan: DailyMissionPlan | null;
+
+    calendarFollowUpQueue: CalendarFollowUpItem[];
+
+    resolvedCalendarEventKeys: string[];
+
+    missionHiddenEventTitles: string[];
+
     currentMission: Mission | null;
 
     missionHistory: Mission[];
+
+    missionHiddenEventIds: string[];
 
     memory: Memory;
 
@@ -61,6 +72,4 @@ export type StudentState = {
     dailyBriefings: DailyBriefing[];
 
     ingestionReviewQueue: IngestionReviewItem[];
-
-    missionHiddenEventIds: string[];
   };

@@ -11,7 +11,8 @@ For the remaining live integrations, I need the provider credentials and a few c
 3. Google OAuth client secret
 4. Google OAuth redirect URI you want to use
 5. A long random encryption secret for token storage
-6. Any Microsoft app credentials later, if you want Outlook/OneDrive support next
+6. Brightspace / D2L base URL, OAuth client ID, client secret, redirect URI, auth URL, token URL, API base, and API scopes
+7. Any Microsoft app credentials later, if you want Outlook/OneDrive support next
 
 ## What should stay private
 
@@ -21,8 +22,8 @@ Please do not send me passwords or raw refresh tokens. We should use OAuth flows
 
 1. Google Calendar two-way sync
 2. Google Classroom assignment and announcement import
-3. Gmail and Google Drive read-only import
-4. D2L/Brightspace adapter scaffolding
+3. D2L/Brightspace import adapter
+4. Gmail and Google Drive read-only import
 5. Microsoft support
 6. Browser extension
 7. Mobile app
@@ -50,3 +51,26 @@ Once the Google credentials are in place, we can connect the first live provider
 - regenerate Mission
 - update Home and Analytics
 - avoid duplicates on re-sync
+
+### Current environment variables
+
+- `ACADEMIC_OS_GOOGLE_PROJECT_ID`
+- `ACADEMIC_OS_GOOGLE_CLIENT_ID`
+- `ACADEMIC_OS_GOOGLE_CLIENT_SECRET`
+- `ACADEMIC_OS_GOOGLE_REDIRECT_URI`
+- `ACADEMIC_OS_ENCRYPTION_SECRET`
+- `ACADEMIC_OS_DEFAULT_TIMEZONE`
+- `ACADEMIC_OS_BRIGHTSPACE_BASE_URL`
+- `ACADEMIC_OS_BRIGHTSPACE_AUTH_URL`
+- `ACADEMIC_OS_BRIGHTSPACE_TOKEN_URL`
+- `ACADEMIC_OS_BRIGHTSPACE_API_BASE`
+- `ACADEMIC_OS_BRIGHTSPACE_CLIENT_ID`
+- `ACADEMIC_OS_BRIGHTSPACE_CLIENT_SECRET`
+- `ACADEMIC_OS_BRIGHTSPACE_REDIRECT_URI`
+- `ACADEMIC_OS_BRIGHTSPACE_SCOPES`
+- If you are only testing locally, `ACADEMIC_OS_BRIGHTSPACE_REDIRECT_URI` can default to:
+  - `http://localhost:3000/api/integrations/brightspace/oauth/callback`
+- Optional Brightspace paths:
+  - `ACADEMIC_OS_BRIGHTSPACE_USERINFO_PATH`
+  - `ACADEMIC_OS_BRIGHTSPACE_ENROLLMENTS_PATH`
+  - `ACADEMIC_OS_BRIGHTSPACE_NEWS_PATH_TEMPLATE`

@@ -2,17 +2,7 @@ import type { Assignment } from "@/lib/assignment";
 import type { CalendarEvent } from "@/lib/calendar";
 import type { SchoolDocument } from "@/lib/documents";
 import { classifyAcademicMessage } from "@/lib/command-center";
-import {
-  createReviewItem,
-  ingestAssignment,
-  ingestCalendarEvent,
-  ingestDocument,
-  type IngestionReviewItem,
-  type IngestedAssignment,
-  type IngestedCalendarEvent,
-  type IngestedDocument,
-} from "@/lib/ingestion";
-import type { SourceConfidence } from "@/lib/academic-core";
+import { createReviewItem, ingestAssignment, ingestCalendarEvent, ingestDocument, type IngestionReviewItem, type IngestedAssignment, type IngestedCalendarEvent, type IngestedDocument } from "@/lib/ingestion";
 import type { StudentState } from "@/lib/student-state";
 
 type IntakeKind = "assignment" | "calendar-event" | "document";
@@ -21,8 +11,6 @@ export type IntakeOutcome =
   | { outcome: "imported"; kind: IntakeKind; id: string }
   | { outcome: "review"; kind: IntakeKind; reviewId: string }
   | { outcome: "classified"; commandType: ReturnType<typeof classifyAcademicMessage>["type"] };
-
-const DEFAULT_REVIEW_THRESHOLD = 0.8;
 
 function normalize(value: string) {
   return value.trim().toLowerCase();
@@ -66,8 +54,8 @@ function isSameDocument(existing: SchoolDocument, incoming: IngestedDocument) {
   );
 }
 
-function shouldReview(confidence: SourceConfidence, threshold = DEFAULT_REVIEW_THRESHOLD) {
-  return confidence.needsConfirmation || confidence.score < threshold;
+function shouldReview() {
+  return true;
 }
 
 function upsertReviewItem(state: StudentState, item: IngestionReviewItem) {
@@ -111,22 +99,18 @@ export function ingestAssignmentWithReview(state: StudentState, data: IngestedAs
     return { state: next, imported: true as const, duplicate: true as const, id: existing.id };
   }
 
-  if (shouldReview(data.source.confidence)) {
-    const queued = queueCandidate(state, data.title, data.source.confidence.reason, data);
-    return {
-      state: queued,
-      imported: false as const,
-      reviewId: queued.ingestionReviewQueue[0]?.id || "",
-    };
+  if (shouldReview()) {
+    const queued = queueCandidate(
+      state,
+      data.title,
+      data.source.confidence.reason,
+      data,
+    );
+    return { state: queued, imported: false as const, reviewId: queued.ingestionReviewQueue[0]?.id || "" };
   }
 
   const next = ingestAssignment(state, data);
-  return {
-    state: next,
-    imported: true as const,
-    duplicate: false as const,
-    id: next.assignments.find((assignment) => isSameAssignment(assignment, data))?.id || "",
-  };
+  return { state: next, imported: true as const, duplicate: false as const, id: next.assignments.find((assignment) => isSameAssignment(assignment, data))?.id || "" };
 }
 
 export function ingestCalendarEventWithReview(state: StudentState, data: IngestedCalendarEvent) {
@@ -136,22 +120,18 @@ export function ingestCalendarEventWithReview(state: StudentState, data: Ingeste
     return { state: next, imported: true as const, duplicate: true as const, id: existing.id };
   }
 
-  if (shouldReview(data.source.confidence)) {
-    const queued = queueCandidate(state, data.title, data.source.confidence.reason, data);
-    return {
-      state: queued,
-      imported: false as const,
-      reviewId: queued.ingestionReviewQueue[0]?.id || "",
-    };
+  if (shouldReview()) {
+    const queued = queueCandidate(
+      state,
+      data.title,
+      data.source.confidence.reason,
+      data,
+    );
+    return { state: queued, imported: false as const, reviewId: queued.ingestionReviewQueue[0]?.id || "" };
   }
 
   const next = ingestCalendarEvent(state, data);
-  return {
-    state: next,
-    imported: true as const,
-    duplicate: false as const,
-    id: next.calendar.find((event) => isSameCalendarEvent(event, data))?.id || "",
-  };
+  return { state: next, imported: true as const, duplicate: false as const, id: next.calendar.find((event) => isSameCalendarEvent(event, data))?.id || "" };
 }
 
 export function ingestDocumentWithReview(state: StudentState, data: IngestedDocument) {
@@ -161,22 +141,18 @@ export function ingestDocumentWithReview(state: StudentState, data: IngestedDocu
     return { state: next, imported: true as const, duplicate: true as const, id: existing.id };
   }
 
-  if (shouldReview(data.source.confidence)) {
-    const queued = queueCandidate(state, data.title, data.source.confidence.reason, data);
-    return {
-      state: queued,
-      imported: false as const,
-      reviewId: queued.ingestionReviewQueue[0]?.id || "",
-    };
+  if (shouldReview()) {
+    const queued = queueCandidate(
+      state,
+      data.title,
+      data.source.confidence.reason,
+      data,
+    );
+    return { state: queued, imported: false as const, reviewId: queued.ingestionReviewQueue[0]?.id || "" };
   }
 
   const next = ingestDocument(state, data);
-  return {
-    state: next,
-    imported: true as const,
-    duplicate: false as const,
-    id: next.documents.find((document) => isSameDocument(document, data))?.id || "",
-  };
+  return { state: next, imported: true as const, duplicate: false as const, id: next.documents.find((document) => isSameDocument(document, data))?.id || "" };
 }
 
 export function ingestFromCommand(input: string) {

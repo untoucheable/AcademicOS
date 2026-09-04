@@ -31,7 +31,7 @@ export function Modal({ open, onClose, title, description, children, className }
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto p-4">
       <div
         className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity"
         onClick={onClose}
@@ -42,11 +42,11 @@ export function Modal({ open, onClose, title, description, children, className }
         aria-modal
         aria-labelledby="modal-title"
         className={cn(
-          "relative z-10 w-full max-w-lg animate-in fade-in zoom-in-95 rounded-xl border border-border bg-card shadow-xl",
+          "relative z-10 flex max-h-[calc(100vh-2rem)] w-full max-w-lg animate-in fade-in zoom-in-95 flex-col rounded-xl border border-border bg-card shadow-xl",
           className,
         )}
       >
-        <div className="flex items-start justify-between border-b border-border px-5 py-4">
+        <div className="flex shrink-0 items-start justify-between border-b border-border px-5 py-4">
           <div>
             <h2 id="modal-title" className="text-lg font-semibold">
               {title}
@@ -55,11 +55,11 @@ export function Modal({ open, onClose, title, description, children, className }
               <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>
             )}
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-        <div className="p-5">{children}</div>
+            <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
       </div>
     </div>
   );

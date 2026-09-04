@@ -31,6 +31,13 @@ export function DocumentsPageContent() {
     setSelectedId(id);
   }
 
+  function handleDeleteNote(id: string) {
+    const target = documents.find((document) => document.id === id);
+    const label = target ? `"${target.title || "Untitled Note"}"` : "this note";
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    deleteDocument(id);
+  }
+
   return (
     <>
       <Header title="Documents" description="Create, edit, and auto-save your study notes." />
@@ -80,8 +87,8 @@ export function DocumentsPageContent() {
             {selectedId && (
               <DocumentEditor
                 id={selectedId}
-                canDelete={documents.length > 1}
-                onDelete={() => deleteDocument(selectedId)}
+                canDelete={documents.length > 0}
+                onDelete={() => handleDeleteNote(selectedId)}
               />
             )}
           </div>

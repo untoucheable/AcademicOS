@@ -1,44 +1,42 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { readStorage, writeStorage } from "@/lib/storage/helpers";
+import { useEffect, useState } from "react";
 
 export function useLocalStorage<T>(
   key: string,
-  initialValue: T,
+  initialValue: T
 ): [T, (value: T | ((prev: T) => T)) => void, boolean] {
-  const initialRef = useRef(initialValue);
   const [storedValue, setStoredValue] = useState<T>(initialValue);
-  const [isLoaded, setIsLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(false);
 
+  // Load from localStorage on first render
   useEffect(() => {
-    setStoredValue(readStorage(key, initialRef.current));
-    setIsLoaded(true);
-  }, [key]);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-    writeStorage(key, storedValue);
-  }, [key, storedValue, isLoaded]);
-
-  useEffect(() => {
-    function handleStorage(event: StorageEvent) {
-      if (event.key === key && event.newValue !== null) {
-        try {
-          setStoredValue(JSON.parse(event.newValue) as T);
-        } catch {
-          // ignore malformed cross-tab updates
-        }
+    try {
+      const item = localStorage.getItem(key);
+      if (item !== null) {
+        setStoredValue(JSON.parse(item));
       }
+    } catch (err) {
+      console.error("Error reading localStorage key:", key, err);
+    } finally {
+      setLoaded(true);
     }
-
-    window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
   }, [key]);
 
-  const setValue = useCallback((value: T | ((prev: T) => T)) => {
-    setStoredValue((prev) => (typeof value === "function" ? (value as (p: T) => T)(prev) : value));
-  }, []);
+  // Save to localStorage whenever value changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(storedValue));
+    } catch (err) {
+      console.error("Error writing localStorage key:", key, err);
+    }
+  }, [key, storedValue]);
 
-  return [storedValue, setValue, isLoaded];
+  const setValue = (value: T | ((prev: T) => T)) => {
+    setStoredValue((prev) =>
+      typeof value === "function" ? (value as (p: T) => T)(prev) : value
+    );
+  };
+
+  return [storedValue, setValue, loaded];
 }

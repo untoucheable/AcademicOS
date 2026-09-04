@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingScreen } from "@/components/ui/loading";
 import { Modal } from "@/components/ui/modal";
+import { isAssessmentPrepType } from "@/lib/assignment";
 import { filterAssignments } from "@/lib/date";
 import type { Assignment, AssignmentFilter } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -55,6 +56,13 @@ export function AssignmentsPageContent() {
   function closeModal() {
     setModalOpen(false);
     setEditing(null);
+  }
+
+  function handleDelete(id: string) {
+    const target = assignments.find((assignment) => assignment.id === id);
+    const label = target ? `"${target.title}"` : "this assignment";
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    deleteAssignment(id);
   }
 
   return (
@@ -150,7 +158,7 @@ export function AssignmentsPageContent() {
                     assignment={assignment}
                     onToggleComplete={toggleAssignmentComplete}
                     onEdit={openEdit}
-                    onDelete={deleteAssignment}
+                    onDelete={handleDelete}
                   />
                 ))}
               </tbody>
@@ -170,10 +178,36 @@ export function AssignmentsPageContent() {
           submitLabel={editing ? "Save Changes" : "Create Assignment"}
           onCancel={closeModal}
           onSubmit={(data) => {
+            const progress = isAssessmentPrepType(data.assessmentType)
+              ? {
+                  percentComplete: 0,
+                  completedSteps: [],
+                  remainingSteps: [],
+                  studyMinutesCompleted: data.studyMinutesCompleted,
+                  lastUpdatedAt: new Date().toISOString(),
+                }
+              : {
+                  percentComplete: data.progressPercent,
+                  completedSteps: editing?.progress?.completedSteps ?? [],
+                  remainingSteps: editing?.progress?.remainingSteps ?? [],
+                  lastUpdatedAt: new Date().toISOString(),
+                };
+
+            const payload = {
+              title: data.title.trim(),
+              course: data.course.trim(),
+              assessmentType: data.assessmentType,
+              dueDate: data.dueDate,
+              priority: data.priority,
+              notes: data.notes.trim(),
+              estimatedMinutes: data.estimatedMinutes,
+              progress,
+            };
+
             if (editing) {
-              updateAssignment(editing.id, data);
+              updateAssignment(editing.id, payload);
             } else {
-              addAssignment(data);
+              addAssignment(payload);
             }
             closeModal();
           }}

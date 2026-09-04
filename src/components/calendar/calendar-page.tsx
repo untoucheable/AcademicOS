@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { CalendarPlus, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { Header } from "@/components/header";
 import { useApp } from "@/components/providers/app-provider";
+import { Button } from "@/components/ui/button";
 import { Badge, priorityVariant } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingScreen } from "@/components/ui/loading";
+import { Modal } from "@/components/ui/modal";
 import {
   formatDate,
   getAssignmentsForDate,
@@ -16,20 +18,239 @@ import {
 } from "@/lib/date";
 import { cn } from "@/lib/utils";
 import { CalendarDays } from "lucide-react";
+import type { CalendarEvent } from "@/lib/calendar";
+import { dedupeCalendarEvents } from "@/lib/calendar";
+import type { CalendarFollowUpItem } from "@/lib/calendar-followups";
 
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+function toLocalISOString(date: Date) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetSign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offsetHours = String(Math.floor(absoluteOffset / 60)).padStart(2, "0");
+  const offsetMins = String(absoluteOffset % 60).padStart(2, "0");
+  const pad = (value: number) => String(value).padStart(2, "0");
+
+  return [
+    date.getFullYear(),
+    "-",
+    pad(date.getMonth() + 1),
+    "-",
+    pad(date.getDate()),
+    "T",
+    pad(date.getHours()),
+    ":",
+    pad(date.getMinutes()),
+    ":",
+    pad(date.getSeconds()),
+    offsetSign,
+    offsetHours,
+    ":",
+    offsetMins,
+  ].join("");
+}
+
+function isImportantCalendarEvent(event: CalendarEvent) {
+  if (event.source === "ai") return false;
+  if (event.type === "break") return false;
+  return true;
+}
+
 export function CalendarPageContent() {
-  const { isLoaded, assignments } = useApp();
-  const today = new Date();
+  const { isLoaded, assignments, refreshState } = useApp();
+  const [today] = useState(() => new Date());
   const [viewDate, setViewDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [selectedDate, setSelectedDate] = useState<Date>(today);
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+  const [followUpItems, setFollowUpItems] = useState<CalendarFollowUpItem[]>([]);
+  const [followUpModalOpen, setFollowUpModalOpen] = useState(false);
+  const [lastFollowUpCount, setLastFollowUpCount] = useState(0);
+  const [calendarError, setCalendarError] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [eventModalOpen, setEventModalOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<CalendarEvent | null>(null);
+  const [isRemovingEvent, setIsRemovingEvent] = useState(false);
+  const [eventForm, setEventForm] = useState({
+    title: "",
+    date: toDateKey(today),
+    start: "18:00",
+    end: "19:00",
+    type: "personal",
+  });
 
-  if (!isLoaded) return <LoadingScreen />;
+  const refreshCalendarData = useCallback(async () => {
+    setIsRefreshing(true);
+    setCalendarError("");
+
+    try {
+      const [eventsRes, followUpsRes] = await Promise.all([
+        fetch("/api/calendar/events"),
+        fetch("/api/calendar/follow-ups"),
+      ]);
+
+      if (!eventsRes.ok) {
+        throw new Error("Unable to load calendar events right now.");
+      }
+
+      if (!followUpsRes.ok) {
+        throw new Error("Unable to load calendar follow-ups right now.");
+      }
+
+      const [eventsData, followUpsData] = await Promise.all([
+        eventsRes.json().catch(() => ({})),
+        followUpsRes.json().catch(() => ({})),
+      ]);
+
+      const events = Array.isArray(eventsData.events) ? eventsData.events : [];
+      setCalendarEvents(dedupeCalendarEvents(events));
+      setFollowUpItems(Array.isArray(followUpsData.items) ? followUpsData.items : []);
+    } catch (error) {
+      setCalendarError(error instanceof Error ? error.message : "Unable to load calendar right now.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCalendarData();
+  }, [refreshCalendarData]);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      void refreshCalendarData();
+    };
+
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [refreshCalendarData]);
+
+  useEffect(() => {
+    if (!followUpItems.length) {
+      setFollowUpModalOpen(false);
+      setLastFollowUpCount(0);
+      return;
+    }
+
+    if (followUpItems.length !== lastFollowUpCount) {
+      setFollowUpModalOpen(true);
+      setLastFollowUpCount(followUpItems.length);
+    }
+  }, [followUpItems.length, lastFollowUpCount]);
 
   const weeks = getMonthGrid(viewDate.getFullYear(), viewDate.getMonth());
   const monthLabel = viewDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
   const selectedAssignments = getAssignmentsForDate(assignments, selectedDate);
+  const importantCalendarEvents = useMemo(
+    () => dedupeCalendarEvents(calendarEvents).filter(isImportantCalendarEvent),
+    [calendarEvents],
+  );
+  const selectedCalendarEvents = useMemo(
+    () =>
+      importantCalendarEvents
+        .filter((event) => isSameDay(new Date(event.startTime), selectedDate))
+        .sort((a, b) => a.startTime.localeCompare(b.startTime)),
+    [importantCalendarEvents, selectedDate],
+  );
+  const upcomingItems = useMemo(() => {
+    const start = new Date(today);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(today);
+    end.setDate(end.getDate() + 14);
+    end.setHours(23, 59, 59, 999);
+
+    const assignmentItems = assignments
+      .filter((assignment) => {
+        const due = new Date(assignment.dueDate);
+        return due >= start && due <= end;
+      })
+      .map((assignment) => ({
+        id: `assignment-${assignment.id}`,
+        title: assignment.title,
+        course: assignment.course,
+        when: new Date(assignment.dueDate).toISOString(),
+        timeLabel: "Due",
+        badge: assignment.completed ? "Completed" : "Assignment",
+        badgeVariant: assignment.completed ? ("success" as const) : ("default" as const),
+      }));
+
+    const calendarItems = importantCalendarEvents
+      .filter((event) => {
+        const startTime = new Date(event.startTime);
+        return startTime >= start && startTime <= end;
+      })
+      .map((event) => ({
+        id: event.id,
+        title: event.title,
+        course: event.source === "google-calendar" ? "Imported from Google Calendar" : "AcademicOS block",
+        when: event.startTime,
+        timeLabel: new Date(event.startTime).toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+        }),
+        badge: event.source === "google-calendar" ? "Imported" : event.fixed ? "Fixed" : "Study block",
+        badgeVariant:
+          event.source === "google-calendar"
+            ? ("accent" as const)
+            : event.fixed
+              ? ("success" as const)
+              : ("default" as const),
+      }));
+
+    return [...assignmentItems, ...calendarItems].sort(
+      (a, b) => new Date(a.when).getTime() - new Date(b.when).getTime(),
+    );
+  }, [assignments, importantCalendarEvents, today]);
+
+  async function resolveFollowUp(itemId: string, action: "finished" | "reschedule") {
+    const res = await fetch("/api/calendar/follow-ups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        followUpId: itemId,
+        action,
+        currentTime: new Date().toISOString(),
+      }),
+    });
+
+    if (!res.ok) return;
+
+    await refreshCalendarData();
+  }
+
+  async function removeCalendarEvent() {
+    if (!removeTarget) return;
+
+    setIsRemovingEvent(true);
+    setCalendarError("");
+
+    try {
+      const response = await fetch("/api/calendar/events", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ eventId: removeTarget.id }),
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.error || "Calendar event could not be removed.");
+      }
+
+      setRemoveTarget(null);
+      await refreshState();
+      await refreshCalendarData();
+    } catch (error) {
+      setCalendarError(error instanceof Error ? error.message : "Calendar event could not be removed.");
+    } finally {
+      setIsRemovingEvent(false);
+    }
+  }
+
+  if (!isLoaded) return <LoadingScreen />;
 
   function prevMonth() {
     setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth() - 1, 1));
@@ -41,9 +262,104 @@ export function CalendarPageContent() {
 
   return (
     <>
-      <Header title="Calendar" description="Assignments plotted by due date." />
+      <Header
+        title="Calendar"
+        description="What is coming up across assignments and important fixed events."
+        action={
+          <Button variant="secondary" onClick={() => setEventModalOpen(true)}>
+            <CalendarPlus className="h-4 w-4" />
+            Add Fixed Event
+          </Button>
+        }
+      />
 
       <main className="p-6">
+        {calendarError ? (
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-5 py-4">
+            <div>
+              <h2 className="font-semibold text-red-900">Calendar data could not be loaded</h2>
+              <p className="mt-0.5 text-sm text-red-800">{calendarError}</p>
+            </div>
+            <Button variant="secondary" onClick={() => void refreshCalendarData()} disabled={isRefreshing}>
+              {isRefreshing ? "Refreshing..." : "Try again"}
+            </Button>
+          </div>
+        ) : null}
+
+        {followUpItems.length ? (
+          <section className="mb-6 overflow-hidden rounded-xl border border-amber-200 bg-amber-50 shadow-sm">
+            <div className="flex items-start justify-between gap-4 border-b border-amber-200 px-5 py-4">
+              <div>
+                <h2 className="font-semibold text-amber-900">End-of-day follow-up</h2>
+                <p className="mt-0.5 text-sm text-amber-800">
+                  These events ended already. Please confirm whether they were finished or need to be moved.
+                </p>
+              </div>
+              <Badge variant="accent">{followUpItems.length}</Badge>
+            </div>
+            <div className="divide-y divide-amber-200">
+              {followUpItems.slice(0, 3).map((item) => (
+                <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-amber-950">{item.title}</p>
+                    <p className="mt-0.5 text-sm text-amber-800">
+                      {new Date(item.originalStartTime).toLocaleString([], {
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={() => void resolveFollowUp(item.id, "finished")}>
+                      Finished
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void resolveFollowUp(item.id, "reschedule")}>
+                      Reschedule
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <section className="mb-6 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+          <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+            <div>
+              <h2 className="font-semibold">Upcoming next 14 days</h2>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                Important calendar events and assignment deadlines in chronological order.
+              </p>
+            </div>
+            <Badge variant="accent">{upcomingItems.length} items</Badge>
+          </div>
+          {upcomingItems.length === 0 ? (
+            <EmptyState
+              icon={CalendarDays}
+              title="Nothing lined up yet"
+              description="Important events and upcoming assignments will appear here as they come in."
+              className="border-0 bg-transparent py-10"
+            />
+          ) : (
+            <div className="divide-y divide-border">
+              {upcomingItems.slice(0, 8).map((item) => (
+                <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{item.title}</p>
+                    <p className="mt-0.5 text-sm text-muted-foreground">{item.course}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">{item.timeLabel}</span>
+                    <Badge variant={item.badgeVariant}>{item.badge}</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         <div className="grid gap-6 lg:grid-cols-3">
           <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm lg:col-span-2">
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
@@ -94,7 +410,7 @@ export function CalendarPageContent() {
                 <div key={wi} className="grid grid-cols-7">
                   {week.map((date, di) => {
                     if (!date) {
-                      return (
+  return (
                         <div
                           key={`empty-${wi}-${di}`}
                           className="min-h-24 border-b border-r border-border bg-muted/20"
@@ -103,6 +419,7 @@ export function CalendarPageContent() {
                     }
 
                     const dayAssignments = getAssignmentsForDate(assignments, date);
+                    const dayCalendarEvents = importantCalendarEvents.filter((event) => isSameDay(new Date(event.startTime), date));
                     const isTodayCell = isSameDay(date, today);
                     const isSelected = isSameDay(date, selectedDate);
 
@@ -139,9 +456,22 @@ export function CalendarPageContent() {
                               {a.title}
                             </div>
                           ))}
+                          {dayCalendarEvents.slice(0, 1).map((event) => (
+                            <div
+                              key={`${event.id}-${event.startTime}-${event.endTime}`}
+                              className="truncate rounded border-l-2 border-l-blue-500 bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium"
+                            >
+                              {event.title}
+                            </div>
+                          ))}
                           {dayAssignments.length > 2 && (
                             <p className="text-[10px] text-muted-foreground">
                               +{dayAssignments.length - 2} more
+                            </p>
+                          )}
+                          {dayCalendarEvents.length > 1 && (
+                            <p className="text-[10px] text-muted-foreground">
+                              +{dayCalendarEvents.length - 1} calendar event{dayCalendarEvents.length - 1 !== 1 ? "s" : ""}
                             </p>
                           )}
                         </div>
@@ -158,21 +488,24 @@ export function CalendarPageContent() {
               <h2 className="font-semibold">{formatDate(toDateKey(selectedDate))}</h2>
               <p className="text-sm text-muted-foreground">
                 {selectedAssignments.length} assignment
-                {selectedAssignments.length !== 1 ? "s" : ""} due
+                {selectedAssignments.length !== 1 ? "s" : ""} and {selectedCalendarEvents.length} important
+                {selectedCalendarEvents.length !== 1 ? " events" : " event"} scheduled
               </p>
             </div>
 
-            {selectedAssignments.length === 0 ? (
-              <EmptyState
-                icon={CalendarDays}
-                title="No assignments"
-                description="Nothing is due on this date."
-                className="border-0 bg-transparent py-12"
-              />
+            {selectedAssignments.length === 0 && selectedCalendarEvents.length === 0 ? (
+              <div className="space-y-4">
+                <EmptyState
+                  icon={CalendarDays}
+                  title="Nothing scheduled"
+                  description="No assignments or important events land on this date yet."
+                  className="border-0 bg-transparent py-12"
+                />
+              </div>
             ) : (
-              <ul className="divide-y divide-border">
+              <div className="divide-y divide-border">
                 {selectedAssignments.map((a) => (
-                  <li key={a.id} className="px-5 py-4">
+                  <div key={a.id} className="px-5 py-4">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <p
@@ -190,13 +523,239 @@ export function CalendarPageContent() {
                     <p className="mt-2 text-xs text-muted-foreground">
                       {a.completed ? "Completed" : "Pending"}
                     </p>
-                  </li>
+                  </div>
                 ))}
-              </ul>
+                {selectedCalendarEvents.length > 0 && (
+                  <div className="px-5 py-4">
+                    <h3 className="text-sm font-semibold">Important events</h3>
+                    <ul className="mt-3 space-y-2">
+                      {selectedCalendarEvents.map((event) => (
+                        <li
+                          key={`${event.id}-${event.startTime}-${event.endTime}`}
+                          className="rounded-lg border border-border bg-background px-3 py-2"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <p className="font-medium">{event.title}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {new Date(event.startTime).toLocaleTimeString([], {
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })}{" "}
+                                -{" "}
+                                {new Date(event.endTime).toLocaleTimeString([], {
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Badge variant={event.source === "google-calendar" ? "accent" : event.fixed ? "success" : "default"}>
+                                {event.source === "google-calendar"
+                                  ? "Imported"
+                                  : event.fixed
+                                    ? "Fixed"
+                                    : "Study block"}
+                              </Badge>
+                              <button
+                                type="button"
+                                onClick={() => setRemoveTarget(event)}
+                                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-700"
+                                aria-label={`Remove ${event.title}`}
+                                title="Remove event"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
             )}
           </section>
         </div>
       </main>
+
+      <Modal
+        open={followUpModalOpen}
+        onClose={() => setFollowUpModalOpen(false)}
+        title="Did these events get finished?"
+        description="Pick finished to remove them, or reschedule to move them to the next open slot."
+      >
+        <div className="space-y-3">
+          {followUpItems.map((item) => (
+            <div key={item.id} className="rounded-lg border border-border bg-background p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-medium">{item.title}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {new Date(item.originalStartTime).toLocaleString([], {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => void resolveFollowUp(item.id, "finished")}>
+                    Finished
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => void resolveFollowUp(item.id, "reschedule")}>
+                    Reschedule
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Modal>
+
+      <Modal
+        open={eventModalOpen}
+        onClose={() => setEventModalOpen(false)}
+        title="Add a fixed event"
+        description="Use this for real commitments like practice, work, appointments, or anything else that should stay fixed."
+      >
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-sm font-medium" htmlFor="event-title">Event name</label>
+            <input
+              id="event-title"
+              value={eventForm.title}
+              onChange={(e) => setEventForm((current) => ({ ...current, title: e.target.value }))}
+              className="w-full rounded-lg border border-border bg-background p-2"
+              placeholder="Refereeing"
+            />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="event-date">Date</label>
+              <input
+                id="event-date"
+                type="date"
+                value={eventForm.date}
+                onChange={(e) => setEventForm((current) => ({ ...current, date: e.target.value }))}
+                className="w-full rounded-lg border border-border bg-background p-2"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="event-start">Start</label>
+              <input
+                id="event-start"
+                type="time"
+                value={eventForm.start}
+                onChange={(e) => setEventForm((current) => ({ ...current, start: e.target.value }))}
+                className="w-full rounded-lg border border-border bg-background p-2"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="event-end">End</label>
+              <input
+                id="event-end"
+                type="time"
+                value={eventForm.end}
+                onChange={(e) => setEventForm((current) => ({ ...current, end: e.target.value }))}
+                className="w-full rounded-lg border border-border bg-background p-2"
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium" htmlFor="event-type">Type</label>
+            <select
+              id="event-type"
+              value={eventForm.type}
+              onChange={(e) => setEventForm((current) => ({ ...current, type: e.target.value }))}
+              className="w-full rounded-lg border border-border bg-background p-2 text-sm"
+            >
+              <option value="personal">Personal</option>
+              <option value="exercise">Exercise</option>
+              <option value="school">School</option>
+              <option value="study">Study</option>
+            </select>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setEventModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={async () => {
+                const startTime = toLocalISOString(new Date(`${eventForm.date}T${eventForm.start}:00`));
+                const endTime = toLocalISOString(new Date(`${eventForm.date}T${eventForm.end}:00`));
+
+                const response = await fetch("/api/calendar/events", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    title: eventForm.title.trim(),
+                    type: eventForm.type,
+                    startTime,
+                    endTime,
+                  }),
+                });
+                const data = await response.json().catch(() => ({}));
+
+                if (!response.ok) {
+                  setCalendarError(data.error || "Fixed event could not be created.");
+                  return;
+                }
+
+                setEventModalOpen(false);
+                setEventForm({
+                  title: "",
+                  date: toDateKey(today),
+                  start: "18:00",
+                  end: "19:00",
+                  type: "personal",
+                });
+                await fetch("/api/mission", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    input: `Added fixed event: ${data.event?.title || "calendar event"}`,
+                    currentTime: new Date().toISOString(),
+                    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    mode: "replan",
+                  }),
+                });
+                await refreshState();
+                await refreshCalendarData();
+              }}
+            >
+              Save Event
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(removeTarget)}
+        onClose={() => setRemoveTarget(null)}
+        title="Remove calendar event?"
+        description="This removes the event from AcademicOS and updates today's Mission."
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to remove {removeTarget?.title || "this event"}?
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setRemoveTarget(null)} disabled={isRemovingEvent}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={() => void removeCalendarEvent()} disabled={isRemovingEvent}>
+              <Trash2 className="h-4 w-4" />
+              {isRemovingEvent ? "Removing..." : "Remove Event"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </>
   );
 }

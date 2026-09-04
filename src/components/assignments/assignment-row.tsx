@@ -2,6 +2,12 @@
 
 import { Check, Pencil, Trash2 } from "lucide-react";
 import type { Assignment } from "@/lib/types";
+import {
+  getAssessmentStudyMinutesCompleted,
+  getAssignmentProgressPercent,
+  getAssignmentRemainingMinutes,
+  isAssessmentPrepType,
+} from "@/lib/assignment";
 import { formatDate, formatRelativeDue, isPastDue } from "@/lib/date";
 import { Badge, priorityVariant, statusVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +27,10 @@ export function AssignmentRow({
   onDelete,
 }: AssignmentRowProps) {
   const overdue = !assignment.completed && isPastDue(assignment.dueDate);
+  const isAssessmentPrep = isAssessmentPrepType(assignment.assessmentType);
+  const progress = getAssignmentProgressPercent(assignment);
+  const remainingMinutes = getAssignmentRemainingMinutes(assignment);
+  const studiedMinutes = getAssessmentStudyMinutesCompleted(assignment);
 
   return (
     <tr className="group transition-colors hover:bg-muted/30">
@@ -48,7 +58,26 @@ export function AssignmentRow({
             >
               {assignment.title}
             </p>
-            <p className="text-sm text-muted-foreground">{assignment.course}</p>
+            <div className="mt-1 flex flex-wrap gap-2">
+              <p className="text-sm text-muted-foreground">{assignment.course}</p>
+              {assignment.assessmentType ? (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {assignment.assessmentType}
+                </span>
+              ) : null}
+              {typeof assignment.estimatedMinutes === "number" ? (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {isAssessmentPrep
+                    ? `${studiedMinutes}/${assignment.estimatedMinutes} min studied`
+                    : `${remainingMinutes} min left`}
+                </span>
+              ) : null}
+              {!isAssessmentPrep ? (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {progress}%
+                </span>
+              ) : null}
+            </div>
           </div>
         </div>
       </td>

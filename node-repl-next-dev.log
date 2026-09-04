@@ -1,0 +1,48 @@
+   ▲ Next.js 15.5.19 (Turbopack)
+   - Local:        http://127.0.0.1:3038
+   - Network:      http://127.0.0.1:3038
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 3.4s
+ ○ Compiling / ...
+ ✓ Compiled / in 7.6s
+ GET / 200 in 8796ms
+ GET / 200 in 359ms
+ ○ Compiling /api/mission ...
+ ✓ Compiled /api/mission in 2s
+ GET /api/review 200 in 2284ms
+ POST /api/mission 200 in 4203ms
+ GET / 200 in 744ms
+ GET /api/review 200 in 517ms
+ POST /api/mission 200 in 1918ms
+ ✓ Compiled /api/integrations/mock-website-scan in 384ms
+ POST /api/integrations/mock-website-scan 200 in 764ms
+ POST /api/mission 200 in 1657ms
+ GET /api/review 200 in 430ms
+ ✓ Compiled /api/review/[reviewId] in 266ms
+ POST /api/review/review-7b664883-38f8-4615-8c1e-ac3fab536e73 200 in 2364ms
+ POST /api/mission 200 in 1829ms
+ POST /api/mission 200 in 1694ms
+   ▲ Next.js 15.5.19 (Turbopack)
+   - Local:        http://127.0.0.1:3038
+   - Network:      http://127.0.0.1:3038
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 2.9s
+ ○ Compiling /api/mission ...
+ ✓ Compiled /api/mission in 5.1s
+ POST /api/mission 200 in 7220ms
+[?25h
+   ▲ Next.js 15.5.19 (Turbopack)
+   - Local:        http://127.0.0.1:3038
+   - Network:      http://127.0.0.1:3038
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 3.4s
+ ○ Compiling /api/mission ...
+ ✓ Compiled /api/mission in 4.3s
+ POST /api/mission 200 in 6606ms
+[?25h

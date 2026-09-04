@@ -2790,7 +2790,7 @@ export async function POST(req: Request) {
   try {
     const { input, currentTime, timeZone, mode, action, eventId } = await req.json();
     fallbackCurrentTime = currentTime || fallbackCurrentTime;
-    let state = getState();
+    let state = await getState();
     const requestMode = typeof mode === "string" ? mode : "replan";
     const manualMentalState = getAuthoritativeMentalState(state, fallbackCurrentTime);
     const energyMode = manualMentalState.energyMode;
@@ -2802,7 +2802,7 @@ export async function POST(req: Request) {
       }
 
       let blockedRemovalMessage = "";
-      const updated = updateState((state) => {
+      const updated = await updateState((state) => {
         const hiddenIds = new Set(state.missionHiddenEventIds || []);
         const suppressedAssignmentIds = getActiveMissionSuppressedAssignmentIds(
           state,
@@ -2976,7 +2976,7 @@ export async function POST(req: Request) {
           reason: "Quick update matched an existing mission item.",
         });
 
-        updateState((state) => ({
+        await updateState((state) => ({
           ...state,
           currentMission: sanitizedMission,
         }));
@@ -3082,7 +3082,7 @@ export async function POST(req: Request) {
           : "Quick update kept the existing mission plan.",
       }, state, quickAssignments, currentTime);
 
-      updateState((state) => {
+      await updateState((state) => {
         const nextSuppressedAssignmentIds = getActiveMissionSuppressedAssignmentIds(state, currentTime);
         if (amended.inserted?.title) {
           const insertedAssignment = resolveRelatedAssignmentForEvent(
@@ -3206,7 +3206,7 @@ Rules:
 
     if (removals.length) {
       let removedCount = 0;
-      const updated = updateState((state) => {
+      const updated = await updateState((state) => {
         const hiddenIds = new Set(state.missionHiddenEventIds || []);
         const sourceEvents = state.currentMission?.schedule?.length ? state.currentMission.schedule : state.calendar;
         const matchedEvents = sourceEvents.filter((event) =>
@@ -3307,7 +3307,7 @@ If no event exists:
     const extractedEvents = extracted.calendarEvents || [];
 
     if (extractedEvents.length) {
-      updateState((state) => ({
+      await updateState((state) => ({
         ...state,
     
         calendar: [
@@ -3336,10 +3336,10 @@ If no event exists:
         ],
       }));
     
-      state = getState();
+      state = await getState();
     }
 
-    state = updateState((currentState) => ({
+    state = await updateState((currentState) => ({
       ...currentState,
       status: {
         ...currentState.status,
@@ -3681,7 +3681,7 @@ Every study block must name the exact assignment, course, document, or subject b
       reason: input ? `Replanned from user input: ${input}` : "Replanned from shared academic data",
     };
 
-    updateState((state) => {
+    await updateState((state) => {
       // 1. Remove old AI-generated events
       const filteredCalendar = state.calendar.filter(
         (event) => event.source !== "ai"
@@ -3739,12 +3739,12 @@ Every study block must name the exact assignment, course, document, or subject b
       const mission = sortMission(
         buildAiFallbackMission(
           fallbackCurrentTime,
-          getState(),
+          await getState(),
           buildAiFallbackSummary(err),
         ),
       );
 
-      updateState((state) => ({
+      await updateState((state) => ({
         ...state,
         currentMission: mission,
         missionHistory: state.currentMission
@@ -3762,9 +3762,9 @@ Every study block must name the exact assignment, course, document, or subject b
 
     if (isAiConnectionError(err)) {
       logAiFailure("mission", PRIMARY_AI_MODEL, err);
-      const mission = sortMission(buildOfflineMission(fallbackCurrentTime, getState()));
+      const mission = sortMission(buildOfflineMission(fallbackCurrentTime, await getState()));
 
-      updateState((state) => ({
+      await updateState((state) => ({
         ...state,
         currentMission: mission,
         missionHistory: state.currentMission

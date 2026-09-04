@@ -132,7 +132,7 @@ export function MissionPageContent() {
 
   const loadReviewItems = useCallback(async () => {
     const res = await fetch("/api/review");
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
 
     if (res.ok) {
       setReviewItems(data.items || []);
@@ -158,7 +158,7 @@ export function MissionPageContent() {
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
         throw new Error(data.error || "Mission generation failed.");
@@ -211,7 +211,7 @@ export function MissionPageContent() {
         },
         body: JSON.stringify({ action }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
         throw new Error(data.error || "Review action failed.");
@@ -241,7 +241,7 @@ export function MissionPageContent() {
         },
         body: JSON.stringify({ action: "delete-mission-item", eventId }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
         throw new Error(data.error || "Mission update failed.");

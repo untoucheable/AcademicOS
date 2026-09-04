@@ -3,7 +3,8 @@ import { deriveCourses, deriveNotifications } from "@/lib/academic-graph";
 import { getState } from "@/lib/server-state";
 
 export async function GET() {
-  const state = getState();
+  try {
+  const state = await getState();
 
   return Response.json({
     profile: state.profile,
@@ -36,4 +37,8 @@ export async function GET() {
     academicSignals: state.academicSignals,
     dailyBriefings: state.dailyBriefings.slice(0, 5),
   });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Academic overview load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }

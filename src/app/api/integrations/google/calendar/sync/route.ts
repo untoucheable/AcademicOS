@@ -11,9 +11,9 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({}));
     const timeMin = typeof body.timeMin === "string" ? body.timeMin : undefined;
     const timeMax = typeof body.timeMax === "string" ? body.timeMax : undefined;
-    const result = await syncGoogleCalendarRange(getState(), { timeMin, timeMax });
+    const result = await syncGoogleCalendarRange(await getState(), { timeMin, timeMax });
 
-    updateState(() => result.state);
+    await updateState(() => result.state);
     await requestMissionRebuild(new URL(req.url).origin, config.defaultTimezone, "Google Calendar import completed.");
 
     return NextResponse.json({
@@ -24,7 +24,7 @@ export async function POST(req: Request) {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Google Calendar sync failed.";
     try {
-      markGoogleCalendarConnectionError(message);
+      await markGoogleCalendarConnectionError(message);
     } catch {
       // Ignore secondary error reporting failures.
     }

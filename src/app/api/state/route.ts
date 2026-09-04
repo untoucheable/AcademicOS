@@ -6,9 +6,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 export async function GET() {
-  return Response.json({
-    state: getState(),
-  });
+  try {
+    return Response.json({ state: await getState() });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "State load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function PATCH(req: Request) {
@@ -25,7 +28,7 @@ export async function PATCH(req: Request) {
 
     const nextState = mergeWithDefaultState(incoming);
 
-    const updated = updateState(() => nextState);
+    const updated = await updateState(() => nextState);
 
     return Response.json({
       state: updated,

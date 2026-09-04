@@ -11,8 +11,8 @@ export async function GET() {
   try {
     requireGoogleCalendarConfig();
 
-    const connection = getGoogleCalendarConnection();
-    const tokens = readGoogleCalendarTokens();
+    const connection = await getGoogleCalendarConnection();
+    const tokens = await readGoogleCalendarTokens();
     const connected = Boolean(tokens && connection?.connected);
 
     return NextResponse.json({
@@ -20,7 +20,7 @@ export async function GET() {
       accountEmail: connection?.accountEmail || tokens?.accountEmail || null,
       grantedScopes: connection?.grantedScopes || tokens?.grantedScopes || [],
       lastSyncAt: connection?.lastSyncAt || null,
-      tokenExpiryStatus: getGoogleCalendarTokenExpiryStatus(),
+      tokenExpiryStatus: await getGoogleCalendarTokenExpiryStatus(),
       tokenExpiresAt: connection?.tokenExpiresAt || tokens?.expiresAt || null,
       latestError: connection?.latestError || null,
     });

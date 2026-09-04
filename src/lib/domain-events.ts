@@ -42,7 +42,9 @@ export function emitDomainEvent<TPayload extends Record<string, unknown>>(
     payload,
   };
 
-  appendDomainEvent(event);
+  void appendDomainEvent(event).catch((error) => {
+    console.error("AcademicOS domain event persistence failed", error);
+  });
 
   for (const handler of handlers) {
     handler(event);
@@ -51,7 +53,6 @@ export function emitDomainEvent<TPayload extends Record<string, unknown>>(
   return event;
 }
 
-export function readDomainEvents() {
-  return readDatabase().events;
+export async function readDomainEvents() {
+  return (await readDatabase()).events;
 }
-

@@ -4,9 +4,10 @@ import { getState, updateState } from "@/lib/server-state";
 import { setIntegrationPermission } from "@/lib/permissions";
 import { syncIntegrationConnection } from "@/lib/sync-service";
 
-function countProviderUsage(provider: AcademicSourceProvider) {
-  const state = getState();
-
+function countProviderUsage(
+  state: Awaited<ReturnType<typeof getState>>,
+  provider: AcademicSourceProvider,
+) {
   return {
     assignments: state.assignments.filter((item) => item.source?.provider === provider).length,
     documents: state.documents.filter((item) => item.source?.provider === provider).length,
@@ -16,7 +17,8 @@ function countProviderUsage(provider: AcademicSourceProvider) {
 }
 
 export async function GET() {
-  const state = getState();
+  try {
+  const state = await getState();
 
   return Response.json({
     providers: automationProviders.map((provider) => {
@@ -31,13 +33,17 @@ export async function GET() {
           enabled: false,
           scopes: provider.scopes,
         },
-        usage: countProviderUsage(provider.provider),
+        usage: countProviderUsage(state, provider.provider),
       };
     }),
     reviewItems: state.ingestionReviewQueue.length,
     signals: state.academicSignals,
     dailyBriefings: state.dailyBriefings.slice(0, 3),
   });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Integration permissions load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function PATCH(req: Request) {
@@ -52,7 +58,7 @@ export async function PATCH(req: Request) {
       );
     }
 
-    const updated = updateState((state) =>
+    const updated = await updateState((state) =>
         syncIntegrationConnection(
           setIntegrationPermission(state, providerConfig.provider, providerConfig.scopes, enabled),
           providerConfig.provider,
@@ -69,7 +75,7 @@ export async function PATCH(req: Request) {
     return Response.json({
       provider: providerConfig.provider,
       permission,
-      usage: countProviderUsage(providerConfig.provider),
+      usage: countProviderUsage(updated, providerConfig.provider),
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Permission update failed";

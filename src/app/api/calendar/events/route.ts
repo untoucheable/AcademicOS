@@ -5,11 +5,13 @@ import { removeCalendarEventById } from "@/lib/calendar-actions";
 import { getState, updateState } from "@/lib/server-state";
 
 export async function GET() {
-  const state = getState();
-
-  return Response.json({
-    events: state.calendar,
-  });
+  try {
+    const state = await getState();
+    return Response.json({ events: state.calendar });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Calendar load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -53,7 +55,7 @@ export async function POST(req: Request) {
       fixed: true,
     };
 
-    const updated = updateState((state) => ({
+    const updated = await updateState((state) => ({
       ...state,
       calendar: normalizeCalendarEvents([...state.calendar, event]),
     }));
@@ -83,9 +85,9 @@ export async function DELETE(req: Request) {
       );
     }
 
-    const existing = getState().calendar.find((event) => event.id === eventId);
+    const existing = (await getState()).calendar.find((event) => event.id === eventId);
     let removedCount = 0;
-    const updated = updateState((state) => {
+    const updated = await updateState((state) => {
       const result = removeCalendarEventById(state, eventId);
       removedCount = result.removedEvents.length;
       return result.state;

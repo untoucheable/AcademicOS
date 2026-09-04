@@ -4,14 +4,13 @@ import { GradeEntry } from "@/lib/grades";
 import { getState, updateState } from "@/lib/server-state";
 
 export async function GET() {
-  const state = getState();
-
-  return Response.json({
-    grades: state.grades.map((grade) => ({
-      ...grade,
-      currentAverage: calculateGradeAverage(grade),
-    })),
-  });
+  try {
+    const state = await getState();
+    return Response.json({ grades: state.grades.map((grade) => ({ ...grade, currentAverage: calculateGradeAverage(grade) })) });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Grades load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -41,7 +40,7 @@ export async function POST(req: Request) {
       date: new Date().toISOString(),
     };
 
-    const updated = updateState((state) => {
+    const updated = await updateState((state) => {
       const existing = state.grades.find(
         (grade) => grade.subject.toLowerCase() === subject.toLowerCase()
       );

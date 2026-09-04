@@ -127,8 +127,8 @@ export async function syncGoogleCalendarState(
   }
 
   const syncedAt = new Date().toISOString();
-  const connection = readGoogleCalendarConnection();
-  setGoogleCalendarConnection({
+  const connection = await readGoogleCalendarConnection();
+  await setGoogleCalendarConnection({
     connected: true,
     accountEmail: tokens.accountEmail,
     grantedScopes: tokens.grantedScopes,

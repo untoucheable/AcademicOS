@@ -14,7 +14,7 @@ export async function POST(req: Request) {
       );
     }
 
-    writeDatabase({
+    await writeDatabase({
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),
       state: defaultStudentState,
@@ -41,7 +41,7 @@ export async function PATCH(req: Request) {
         ? value.map((item) => String(item).trim()).filter(Boolean)
         : undefined;
 
-    const updated = updateState((state) => ({
+    const updated = await updateState((state) => ({
       ...state,
       profile: {
         ...state.profile,

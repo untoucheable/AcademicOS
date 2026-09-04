@@ -2,16 +2,17 @@ import { getFollowUpLabel, resolveCalendarFollowUp } from "@/lib/calendar-follow
 import { getState, updateState } from "@/lib/server-state";
 
 export async function GET() {
-  const state = getState();
-
-  return Response.json({
-    items: state.calendarFollowUpQueue,
-    count: state.calendarFollowUpQueue.length,
-    labels: state.calendarFollowUpQueue.map((item) => ({
-      id: item.id,
-      label: getFollowUpLabel(item),
-    })),
-  });
+  try {
+    const state = await getState();
+    return Response.json({
+      items: state.calendarFollowUpQueue,
+      count: state.calendarFollowUpQueue.length,
+      labels: state.calendarFollowUpQueue.map((item) => ({ id: item.id, label: getFollowUpLabel(item) })),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Calendar follow-up load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -28,7 +29,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const updated = updateState((state) => resolveCalendarFollowUp(state, followUpId, action, currentTime));
+    const updated = await updateState((state) => resolveCalendarFollowUp(state, followUpId, action, currentTime));
 
     return Response.json({
       items: updated.calendarFollowUpQueue,

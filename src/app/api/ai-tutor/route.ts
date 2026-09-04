@@ -46,7 +46,7 @@ function documentSearchTerms(message: string) {
   );
 }
 
-function buildTutorDocuments(message: string, documents: ReturnType<typeof getState>["documents"]) {
+function buildTutorDocuments(message: string, documents: Awaited<ReturnType<typeof getState>>["documents"]) {
   const terms = documentSearchTerms(message);
 
   return [...documents]
@@ -69,11 +69,13 @@ function buildTutorDocuments(message: string, documents: ReturnType<typeof getSt
 }
 
 export async function GET() {
-  const state = getState();
-
-  return Response.json({
-    messages: state.tutorMessages || [],
-  });
+  try {
+    const state = await getState();
+    return Response.json({ messages: state.tutorMessages || [] });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "AI Tutor history load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -88,7 +90,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const state = getState();
+    const state = await getState();
     const userMessage = {
       id: `tutor:${crypto.randomUUID()}`,
       role: "user" as const,
@@ -203,7 +205,7 @@ export async function POST(req: Request) {
       createdAt: new Date().toISOString(),
     };
 
-    const updated = updateState((current) => ({
+    const updated = await updateState((current) => ({
       ...current,
       tutorMessages: [...(current.tutorMessages || []), userMessage, assistantMessage].slice(-40),
     }));

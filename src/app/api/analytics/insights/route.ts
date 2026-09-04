@@ -99,18 +99,20 @@ function buildDataBasedInsight(analytics: ReturnType<typeof buildAcademicAnalyti
 }
 
 export async function GET() {
-  const state = getState();
-
-  return Response.json({
-    insight: state.analyticsInsight,
-  });
+  try {
+    const state = await getState();
+    return Response.json({ insight: state.analyticsInsight });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Analytics insight load failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const force = body.force === true;
-    const state = getState();
+    const state = await getState();
     const existing = state.analyticsInsight;
 
     if (
@@ -212,7 +214,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const updated = updateState((current) => ({
+    const updated = await updateState((current) => ({
       ...current,
       analyticsInsight: insight,
     }));

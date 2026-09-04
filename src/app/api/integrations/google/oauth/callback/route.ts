@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
 
     const cookieState = req.cookies.get("academic-os-google-oauth-state")?.value;
     const cookieMatches = Boolean(cookieState && cookieState === state);
-    const storeMatches = validateGoogleOAuthState(state);
+    const storeMatches = await validateGoogleOAuthState(state);
 
     if (!cookieMatches && !storeMatches) {
       throw new Error("Invalid OAuth state.");
@@ -36,11 +36,11 @@ export async function GET(req: NextRequest) {
     const config = requireGoogleCalendarConfig();
     await connectGoogleCalendarAccount(config, code);
 
-    const result = await syncGoogleCalendarRange(getState());
-    updateState(() => result.state);
+    const result = await syncGoogleCalendarRange(await getState());
+    await updateState(() => result.state);
     await requestMissionRebuild(url.origin, config.defaultTimezone, "Google Calendar connected and synced.");
 
-    clearGoogleOAuthState(state);
+    await clearGoogleOAuthState(state);
 
     const response = NextResponse.redirect(new URL("/integrations?google=connected", url.origin));
     response.cookies.set({
@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Google OAuth callback failed.";
     try {
-      markGoogleCalendarConnectionError(message);
+      await markGoogleCalendarConnectionError(message);
     } catch {
       // Ignore secondary errors while recording the callback failure.
     }

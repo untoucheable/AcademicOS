@@ -1,10 +1,10 @@
 import { readStateSnapshot, writeStateSnapshot } from "./database";
 import { StudentState } from "./student-state";
 
-export function readStudentState(): StudentState {
+export async function readStudentState(): Promise<StudentState> {
   return readStateSnapshot();
 }
 
-export function writeStudentState(state: StudentState) {
-  writeStateSnapshot(state);
+export async function writeStudentState(state: StudentState) {
+  await writeStateSnapshot(state);
 }

@@ -16,7 +16,7 @@ export async function POST(
       );
     }
 
-    const updated = updateState((state) =>
+    const updated = await updateState((state) =>
       action === "approve"
         ? approveReviewItem(state, reviewId)
         : dismissReviewItem(state, reviewId)

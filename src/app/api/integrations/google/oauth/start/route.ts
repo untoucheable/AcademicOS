@@ -9,7 +9,7 @@ export async function GET() {
     const config = requireGoogleCalendarConfig();
     const state = createGoogleOAuthState();
 
-    setGoogleOAuthState(state);
+    await setGoogleOAuthState(state);
 
     const response = NextResponse.redirect(buildGoogleAuthorizationUrl(config, state));
     response.cookies.set({

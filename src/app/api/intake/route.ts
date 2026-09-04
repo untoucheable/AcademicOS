@@ -17,21 +17,21 @@ export async function POST(req: Request) {
     }
 
     if (kind === "assignment") {
-      const result = updateState((state) => ingestAssignmentWithReview(state, body.payload).state);
+      const result = await updateState((state) => ingestAssignmentWithReview(state, body.payload).state);
       return Response.json({
         state: result,
       });
     }
 
     if (kind === "calendar-event") {
-      const result = updateState((state) => ingestCalendarEventWithReview(state, body.payload).state);
+      const result = await updateState((state) => ingestCalendarEventWithReview(state, body.payload).state);
       return Response.json({
         state: result,
       });
     }
 
     if (kind === "document") {
-      const result = updateState((state) => ingestDocumentWithReview(state, body.payload).state);
+      const result = await updateState((state) => ingestDocumentWithReview(state, body.payload).state);
       return Response.json({
         state: result,
       });

@@ -8,11 +8,11 @@ import { syncIntegrationConnection } from "@/lib/sync-service";
 export async function POST() {
   try {
     const config = requireGoogleCalendarConfig();
-    const state = getState();
+    const state = await getState();
 
     const tokensCleared = await disconnectGoogleCalendarAccount(config);
 
-    const nextState = updateState((current) =>
+    const nextState = await updateState((current) =>
       syncIntegrationConnection(
         {
           ...current,

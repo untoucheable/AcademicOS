@@ -47,15 +47,15 @@ function isExpired(expiresAt?: string | null) {
   return new Date(expiresAt).getTime() <= Date.now() + 60_000;
 }
 
-function toConnectionRecord(
+async function toConnectionRecord(
   tokens: GoogleCalendarTokens,
   latestError: string | null = null,
-): GoogleCalendarConnectionRecord {
+): Promise<GoogleCalendarConnectionRecord> {
   return {
     connected: true,
     accountEmail: tokens.accountEmail,
     grantedScopes: tokens.grantedScopes,
-    lastSyncAt: readGoogleCalendarConnection()?.lastSyncAt || null,
+    lastSyncAt: (await readGoogleCalendarConnection())?.lastSyncAt || null,
     tokenExpiresAt: tokens.expiresAt,
     latestError,
     providerAccountId: tokens.providerAccountId,
@@ -82,14 +82,14 @@ export async function connectGoogleCalendarAccount(
     lastRefreshedAt: new Date().toISOString(),
   };
 
-  saveGoogleCalendarTokens(tokens);
-  setGoogleCalendarConnection(toConnectionRecord(tokens));
+  await saveGoogleCalendarTokens(tokens);
+  await setGoogleCalendarConnection(await toConnectionRecord(tokens));
 
   return { tokens, userInfo };
 }
 
 export async function ensureFreshGoogleCalendarTokens(config: GoogleCalendarConfig) {
-  const tokens = readGoogleCalendarTokens();
+  const tokens = await readGoogleCalendarTokens();
   if (!tokens) {
     throw new Error("Google Calendar is not connected.");
   }
@@ -113,9 +113,9 @@ export async function ensureFreshGoogleCalendarTokens(config: GoogleCalendarConf
     lastRefreshedAt: new Date().toISOString(),
   };
 
-  saveGoogleCalendarTokens(nextTokens);
-  setGoogleCalendarConnection({
-    ...(readGoogleCalendarConnection() || toConnectionRecord(nextTokens)),
+  await saveGoogleCalendarTokens(nextTokens);
+  await setGoogleCalendarConnection({
+    ...((await readGoogleCalendarConnection()) || await toConnectionRecord(nextTokens)),
     connected: true,
     accountEmail: nextTokens.accountEmail,
     grantedScopes: nextTokens.grantedScopes,
@@ -127,13 +127,13 @@ export async function ensureFreshGoogleCalendarTokens(config: GoogleCalendarConf
   return nextTokens;
 }
 
-export function getGoogleCalendarConnection() {
+export async function getGoogleCalendarConnection() {
   return readGoogleCalendarConnection();
 }
 
-export function markGoogleCalendarConnectionError(error: string) {
-  const connection = readGoogleCalendarConnection();
-  setGoogleCalendarConnection({
+export async function markGoogleCalendarConnectionError(error: string) {
+  const connection = await readGoogleCalendarConnection();
+  await setGoogleCalendarConnection({
     connected: Boolean(connection?.connected),
     accountEmail: connection?.accountEmail,
     grantedScopes: connection?.grantedScopes || [],
@@ -145,8 +145,8 @@ export function markGoogleCalendarConnectionError(error: string) {
 }
 
 export async function disconnectGoogleCalendarAccount(config: GoogleCalendarConfig) {
-  const tokens = readGoogleCalendarTokens();
-  const links = readGoogleCalendarLinks();
+  const tokens = await readGoogleCalendarTokens();
+  const links = await readGoogleCalendarLinks();
 
   try {
     if (tokens?.accessToken) {
@@ -168,11 +168,11 @@ export async function disconnectGoogleCalendarAccount(config: GoogleCalendarConf
     // Best effort revocation. We still clean up local state.
   }
 
-  clearGoogleCalendarTokens();
-  clearGoogleCalendarLinks();
-  clearGoogleCalendarConnection();
+  await clearGoogleCalendarTokens();
+  await clearGoogleCalendarLinks();
+  await clearGoogleCalendarConnection();
 
-  setGoogleCalendarConnection({
+  await setGoogleCalendarConnection({
     connected: false,
     grantedScopes: [],
     lastSyncAt: null,
@@ -186,8 +186,8 @@ export async function disconnectGoogleCalendarAccount(config: GoogleCalendarConf
   };
 }
 
-export function getGoogleCalendarTokenExpiryStatus() {
-  const tokens = readGoogleCalendarTokens();
+export async function getGoogleCalendarTokenExpiryStatus() {
+  const tokens = await readGoogleCalendarTokens();
   if (!tokens) return "disconnected";
   if (isExpired(tokens.expiresAt)) return "expired";
   const expiresInMinutes = Math.round((new Date(tokens.expiresAt).getTime() - Date.now()) / 60000);

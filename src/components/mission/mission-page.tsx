@@ -330,6 +330,7 @@ export function MissionPageContent() {
       if (dailyMissionPlan) {
         await setDailyMissionPlan({
           ...dailyMissionPlan,
+          energyLevel,
           focusScore,
           stressLevel,
           updatedAt: new Date().toISOString(),

@@ -54,6 +54,7 @@ export const defaultStudentState: StudentState = {
   missionHiddenEventTitles: [],
   currentMission: null,
   missionHistory: [],
+  wellbeingHistory: [],
   missionHiddenEventIds: [],
   missionSuppressedAssignmentIds: [],
 
@@ -103,6 +104,7 @@ export function mergeWithDefaultState(value: Partial<StudentState>): StudentStat
     missionHiddenEventTitles: asArray(value.missionHiddenEventTitles),
     currentMission: asNullableObject(value.currentMission),
     missionHistory: asArray(value.missionHistory),
+    wellbeingHistory: asArray(value.wellbeingHistory),
     missionHiddenEventIds: asArray(value.missionHiddenEventIds),
     missionSuppressedAssignmentIds: asArray(value.missionSuppressedAssignmentIds),
     integrationPermissions: asArray(value.integrationPermissions),

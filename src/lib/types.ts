@@ -43,6 +43,8 @@ export type StudySession = {
   subject: string;
   durationMinutes: number;
   productivity: number;
+  relatedAssignmentId?: string;
+  relatedMissionEventId?: string;
   notes?: string;
   createdAt: string;
 };
@@ -67,6 +69,7 @@ export type AcademicGoal = {
 export type PomodoroMode = "work" | "break";
 
 export type PomodoroState = {
+  sessionStyle?: "focus";
   workDuration: number;
   breakDuration: number;
   timeLeft: number;
@@ -75,6 +78,9 @@ export type PomodoroState = {
   sessionsCompleted: number;
   totalFocusSeconds: number;
   startedAt: string | null;
+  targetAssignmentId?: string;
+  targetMissionEventId?: string;
+  targetLabel?: string;
 };
 
 export type AssignmentFilter = "all" | "active" | "due-soon" | "completed";

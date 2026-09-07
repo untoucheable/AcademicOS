@@ -54,6 +54,8 @@ type MissionInputAssignment = {
   maximumStudyBlockMinutes?: number;
   shouldFinishToday?: boolean;
   planningPressureScore?: number;
+  weakSubjectPriorityBoost?: number;
+  proactiveFoundationWork?: boolean;
   planningStyle?: "tracked-work" | "assessment-prep";
   notes?: string;
 };
@@ -335,10 +337,69 @@ function buildAiFallbackMission(currentTime: string, state: StudentState, summar
   };
 }
 
+type DeadlineEmergencyPolicy = {
+  active: boolean;
+  assignmentIds: Set<string>;
+};
+
+function getDeadlineEmergencyPolicy(state: StudentState, currentTime: string): DeadlineEmergencyPolicy {
+  const assignmentIds = new Set(
+    state.assignments
+      .filter((assignment) => !assignment.completed)
+      .filter((assignment) => assignment.assessmentType !== "test" && assignment.assessmentType !== "quiz")
+      .filter((assignment) => getAssignmentDaysUntilDue(assignment, currentTime) <= 0)
+      .filter((assignment) => getTrackedWorkRemainingMinutes(assignment) > 0)
+      .map((assignment) => assignment.id),
+  );
+  return { active: assignmentIds.size > 0, assignmentIds };
+}
+
+function isMovableDeadlineEmergencyRestBlock(event: CalendarEvent) {
+  return event.id.includes(":baseline:sleep") ||
+    event.id.includes(":baseline:sunday-sleep") ||
+    event.id.includes(":baseline:saturday-sleep-in") ||
+    event.id.includes(":baseline:sunday-wake") ||
+    event.id.includes(":baseline:saturday-wake");
+}
+
+function buildDeadlineEmergencySummary(
+  schedule: CalendarEvent[],
+  assignments: MissionInputAssignment[],
+  policy: DeadlineEmergencyPolicy,
+) {
+  const urgentAssignments = assignments.filter((assignment) => policy.assignmentIds.has(assignment.id));
+  const remainingMinutes = urgentAssignments.reduce((total, assignment) => total + Math.max(0, assignment.remainingMinutes || 0), 0);
+  const scheduledMinutes = schedule
+    .filter((event) => event.type === "study" && event.relatedAssignmentId && policy.assignmentIds.has(event.relatedAssignmentId))
+    .reduce((total, event) => total + getEventDurationMinutes(event), 0);
+  const shortfallMinutes = Math.max(0, remainingMinutes - scheduledMinutes);
+  const titles = urgentAssignments.map((assignment) => assignment.title).join(", ");
+
+  if (!shortfallMinutes) {
+    return `Deadline emergency mode scheduled all remaining required work for ${titles} around your confirmed fixed events.`;
+  }
+
+  return `Deadline emergency mode scheduled every available non-fixed minute for ${titles}. ${shortfallMinutes} minutes still cannot fit before 11:59 PM because of confirmed fixed events; that remaining work is automatically the first academic priority in the next day's available time.`;
+}
+
 function buildFixedMissionScheduleForDay(state: StudentState, currentTime: string) {
   const { planningDayKey, planningStart, planningEnd, planningOffsetMinutes } = getPlanningWindow(currentTime);
-  const basePlanEvents = buildDailyPlanEvents(state.dailyMissionPlan, currentTime)
-    .filter((event) => isOnPlanningDay(event.startTime, planningDayKey, planningOffsetMinutes));
+  const deadlineEmergencyPolicy = getDeadlineEmergencyPolicy(state, currentTime);
+  const saturdayWakePolicy = getSaturdayWakePolicy(state, currentTime);
+  const bedtimePolicy = getDeadlineBedtimePolicy(state, currentTime);
+  const basePlanEvents = buildDailyPlanEvents(state.dailyMissionPlan, currentTime, {
+    saturdayWakeTime: saturdayWakePolicy.wakeTime,
+  })
+    .filter((event) => isOnPlanningDay(event.startTime, planningDayKey, planningOffsetMinutes))
+    // Sleep is normally protected, but it is the one baseline block that can
+    // move when the deterministic deadline-capacity calculation requires it.
+    .filter((event) => !isBaselineSleepEvent(event))
+    .filter((event) => !deadlineEmergencyPolicy.active || !isMovableDeadlineEmergencyRestBlock(event));
+  const sleepEvent = buildSleepBaselineEvent(
+    planningDayKey,
+    bedtimePolicy.effectiveSleepTarget,
+    currentTime,
+  );
   const fixedCalendarEvents = state.calendar
     .filter(isFixedCalendarEvent)
     .filter((event) => isOnPlanningDay(event.startTime, planningDayKey, planningOffsetMinutes))
@@ -349,13 +410,122 @@ function buildFixedMissionScheduleForDay(state: StudentState, currentTime: strin
     planningStart,
     planningEnd,
     planningOffsetMinutes,
+    bedtimePolicy,
+    saturdayWakePolicy,
+    deadlineEmergencyPolicy,
     fixedEvents: constrainScheduleToPlanningDay(
-      normalizeCalendarEvents([...basePlanEvents, ...fixedCalendarEvents]),
+      normalizeCalendarEvents([
+        ...basePlanEvents,
+        // A same-day tracked-work deadline is the one case where sleep is
+        // deliberately subordinate to all remaining real work. Confirmed
+        // calendar commitments stay in place regardless.
+        ...(deadlineEmergencyPolicy.active ? [] : [sleepEvent]),
+        ...fixedCalendarEvents,
+      ]),
       planningStart,
       planningEnd,
       planningDayKey,
       planningOffsetMinutes,
     ),
+  };
+}
+
+function energyLabelToScore(energyLevel: "low" | "medium" | "high") {
+  if (energyLevel === "low") return 3;
+  if (energyLevel === "high") return 8;
+  return 5;
+}
+
+function recordWellbeingCheckIn(state: StudentState, currentTime: string): StudentState {
+  const date = currentTime.slice(0, 10);
+  const mentalState = getAuthoritativeMentalState(state, currentTime);
+  const checkIn = {
+    date,
+    energyLevel: energyLabelToScore(mentalState.energyLevel),
+    focusScore: mentalState.focusScore,
+    stressLevel: mentalState.stressLevel,
+    recordedAt: currentTime,
+  };
+
+  const history = state.wellbeingHistory || [];
+  const latest = history.at(-1);
+  const unchangedFromLatest = latest &&
+    latest.date === checkIn.date &&
+    latest.energyLevel === checkIn.energyLevel &&
+    latest.focusScore === checkIn.focusScore &&
+    latest.stressLevel === checkIn.stressLevel;
+
+  return {
+    ...state,
+    // Keep meaningful changes throughout the day, but do not let repeated
+    // replans with unchanged sliders distort the longer-term history.
+    wellbeingHistory: (unchangedFromLatest ? history : [...history, checkIn]).slice(-180),
+  };
+}
+
+function getRecentWellbeingDaySummaries(state: StudentState, currentTime: string) {
+  const today = currentTime.slice(0, 10);
+  const mentalState = getAuthoritativeMentalState(state, currentTime);
+  const currentCheckIn = {
+    date: today,
+    energyLevel: energyLabelToScore(mentalState.energyLevel),
+    focusScore: mentalState.focusScore,
+    stressLevel: mentalState.stressLevel,
+    recordedAt: currentTime,
+  };
+
+  const existingToday = (state.wellbeingHistory || []).filter((entry) => entry.date === today).at(-1);
+  const currentAlreadyRecorded = existingToday &&
+    existingToday.energyLevel === currentCheckIn.energyLevel &&
+    existingToday.focusScore === currentCheckIn.focusScore &&
+    existingToday.stressLevel === currentCheckIn.stressLevel;
+  const snapshots = [...(state.wellbeingHistory || []), ...(currentAlreadyRecorded ? [] : [currentCheckIn])]
+    .filter((entry) => /^\d{4}-\d{2}-\d{2}$/.test(entry.date))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.recordedAt.localeCompare(b.recordedAt));
+  const byDate = new Map<string, typeof snapshots>();
+
+  snapshots.forEach((entry) => {
+    byDate.set(entry.date, [...(byDate.get(entry.date) || []), entry]);
+  });
+
+  return [...byDate.entries()]
+    .map(([date, entries]) => ({
+      date,
+      energyLevel: entries.reduce((total, entry) => total + entry.energyLevel, 0) / entries.length,
+      focusScore: entries.reduce((total, entry) => total + entry.focusScore, 0) / entries.length,
+      stressLevel: entries.reduce((total, entry) => total + entry.stressLevel, 0) / entries.length,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-7);
+}
+
+function isStrainDay(entry: { energyLevel: number; stressLevel: number }) {
+  return entry.stressLevel >= 7 && entry.energyLevel <= 4;
+}
+
+function areConsecutiveDates(previous: string, current: string) {
+  const previousDate = new Date(`${previous}T12:00:00Z`);
+  const currentDate = new Date(`${current}T12:00:00Z`);
+  return currentDate.getTime() - previousDate.getTime() === 24 * 60 * 60 * 1000;
+}
+
+function isBaselineSleepEvent(event: CalendarEvent) {
+  return event.id.includes(":baseline:sleep");
+}
+
+function buildSleepBaselineEvent(dateKey: string, sleepTarget: string, currentTime: string): CalendarEvent {
+  const offsetMinutes = parsePlanningOffsetMinutes(currentTime);
+  return {
+    id: `daily-plan:${dateKey}:baseline:sleep`,
+    title: "Sleep",
+    type: "personal",
+    startTime: toPlanningDateTime(dateKey, sleepTarget, offsetMinutes).toISOString(),
+    endTime: toPlanningDateTime(dateKey, "23:59", offsetMinutes).toISOString(),
+    priority: 10,
+    createdAt: currentTime,
+    source: "manual",
+    fixed: true,
+    missionOnly: true,
   };
 }
 
@@ -365,36 +535,46 @@ function deriveBurnoutRiskFromState(
   currentTime: string,
   plannedSchedule: CalendarEvent[] = [],
 ) {
-  const mentalState = getAuthoritativeMentalState(state, currentTime);
-  const activeAssignments = assignments.filter((assignment) => assignment.remainingMinutes && assignment.remainingMinutes > 0);
-  const dueSoonCount = activeAssignments.filter((assignment) => {
-    const daysUntilDue = assignment.daysUntilDue ?? getAssignmentDaysUntilDue(assignment, currentTime);
-    return daysUntilDue <= 2;
-  }).length;
-  const remainingWorkMinutes = activeAssignments.reduce(
-    (total, assignment) => total + Math.max(0, assignment.recommendedTodayMinutes || assignment.remainingMinutes || 0),
-    0,
-  );
+  const checkIns = getRecentWellbeingDaySummaries(state, currentTime);
+  const recentCheckIns = checkIns.slice(-3);
+  let consecutiveStrainDays = 0;
+
+  for (let index = checkIns.length - 1; index >= 0; index -= 1) {
+    const entry = checkIns[index];
+    const followingEntry = checkIns[index + 1];
+    if (!isStrainDay(entry) || (followingEntry && !areConsecutiveDates(entry.date, followingEntry.date))) break;
+    consecutiveStrainDays += 1;
+  }
+
+  const recentStrainDays = recentCheckIns.filter(isStrainDay).length;
+  const averageRecentStress = recentCheckIns.length
+    ? recentCheckIns.reduce((total, entry) => total + entry.stressLevel, 0) / recentCheckIns.length
+    : 0;
+  const averageRecentEnergy = recentCheckIns.length
+    ? recentCheckIns.reduce((total, entry) => total + entry.energyLevel, 0) / recentCheckIns.length
+    : 10;
   const scheduledStudyMinutes = plannedSchedule.reduce((total, event) => {
     if (event.type !== "study") return total;
     return total + Math.max(0, Math.round((new Date(event.endTime).getTime() - new Date(event.startTime).getTime()) / 60000));
   }, 0);
-  const workloadPressure = Math.min(3, Math.round(remainingWorkMinutes / 90));
-  const dueSoonPressure = Math.min(2, dueSoonCount);
-  const schedulePressure = Math.min(1, Math.round(scheduledStudyMinutes / 180));
 
-  return clampScore(
-    mentalState.stressLevel * 0.5 +
-      (11 - (state.status.energyLevel || 5)) * 0.25 +
-      (11 - mentalState.focusScore) * 0.15 +
-      workloadPressure +
-      dueSoonPressure +
-      schedulePressure,
-  );
+  // A difficult day does not equal burnout. Risk rises only after a sustained
+  // pattern of high stress plus low energy, and work volume can intensify an
+  // already-established pattern but cannot create one by itself.
+  let risk = 2;
+  if (consecutiveStrainDays >= 4) risk = 8;
+  else if (consecutiveStrainDays === 3) risk = 7;
+  else if (consecutiveStrainDays === 2) risk = 5;
+  else if (recentStrainDays >= 2 && averageRecentStress >= 7 && averageRecentEnergy <= 4) risk = 4;
+
+  if (risk >= 4 && averageRecentStress >= 8 && averageRecentEnergy <= 3) risk += 1;
+  if (risk >= 4 && scheduledStudyMinutes >= 240) risk += 1;
+
+  return clampScore(risk);
 }
 
 function buildOfflineMission(currentTime: string, state: StudentState): Mission {
-  const { planningStart, planningEnd, fixedEvents, planningDayKey, planningOffsetMinutes } = buildFixedMissionScheduleForDay(state, currentTime);
+  const { planningStart, planningEnd, fixedEvents, planningDayKey, planningOffsetMinutes, bedtimePolicy, deadlineEmergencyPolicy } = buildFixedMissionScheduleForDay(state, currentTime);
   const manualMentalState = getAuthoritativeMentalState(state, currentTime);
   const assignmentLimit = manualMentalState.energyLevel === "high" ? 5 : manualMentalState.energyLevel === "low" ? 1 : 3;
   const missionAssignments = state.assignments
@@ -437,6 +617,7 @@ function buildOfflineMission(currentTime: string, state: StudentState): Mission 
     planningEnd,
     missionAssignments,
     [],
+    deadlineEmergencyPolicy.active,
   );
   const draftMission: Mission = {
     id: crypto.randomUUID(),
@@ -446,14 +627,18 @@ function buildOfflineMission(currentTime: string, state: StudentState): Mission 
     focusScore: manualMentalState.focusScore,
     burnoutRisk: 1,
     expectedFinishTime: currentTime,
-    summary: "AcademicOS built today's priority schedule from your confirmed events and current assignments.",
+    summary: bedtimePolicy.lateMinutes > 0
+      ? `AcademicOS extended bedtime to ${bedtimePolicy.effectiveSleepTarget} because confirmed near-deadline work exceeds normal pre-deadline capacity.`
+      : "AcademicOS built today's priority schedule from your confirmed events and current assignments.",
     schedule: [...fixedEvents, ...plannedStudyEvents],
     reason: "Deterministic mission planner",
   };
 
-  adaptMissionForEnergy(draftMission, fixedEvents, missionAssignments, manualMentalState.energyMode, manualMentalState);
-  draftMission.schedule = enforceAssignmentTimeBudgets(draftMission.schedule, missionAssignments);
+  const energyModeAssignments = getEnergyModeAssignments(state, currentTime, missionAssignments);
+  adaptMissionForEnergy(draftMission, fixedEvents, energyModeAssignments, manualMentalState.energyMode, manualMentalState);
+  draftMission.schedule = enforceAssignmentTimeBudgets(draftMission.schedule, energyModeAssignments);
   draftMission.schedule = addWeakSubjectStudyBlocks(draftMission.schedule, missionAssignments, state, currentTime);
+  applyBurnoutSafeguards(draftMission, state, energyModeAssignments, currentTime);
   draftMission.schedule = closeMissionScheduleGaps(
     constrainScheduleToPlanningDay(
       draftMission.schedule,
@@ -465,6 +650,7 @@ function buildOfflineMission(currentTime: string, state: StudentState): Mission 
     planningStart,
     planningEnd,
     currentTime,
+    deadlineEmergencyPolicy.active,
   );
   applyAuthoritativeMentalState(draftMission, state, missionAssignments, currentTime);
   draftMission.expectedFinishTime = draftMission.schedule.at(-1)?.endTime || currentTime;
@@ -691,6 +877,7 @@ function getConstrainedTrackedWorkEventDuration(
   assignment: MissionInputAssignment,
   scheduledMinutesSoFar: number,
   scheduledBlocksSoFar: number,
+  deadlineEmergency = false,
 ) {
   const minimumBlockMinutes = Math.max(20, assignment.minimumStudyBlockMinutes || 25);
   const maximumBlockMinutes = Math.max(
@@ -703,13 +890,23 @@ function getConstrainedTrackedWorkEventDuration(
   );
   const recommendedBlockCount = Math.max(1, assignment.recommendedBlockCount || 1);
 
-  if (scheduledBlocksSoFar >= recommendedBlockCount) {
+  if (!deadlineEmergency && scheduledBlocksSoFar >= recommendedBlockCount) {
     return null;
   }
 
   const remainingTodayMinutes = recommendedTodayMinutes - scheduledMinutesSoFar;
-  if (remainingTodayMinutes < minimumBlockMinutes) {
+  if (remainingTodayMinutes < minimumBlockMinutes && !deadlineEmergency) {
     return null;
+  }
+
+  if (deadlineEmergency && assignment.shouldFinishToday) {
+    const remainingEmergencyMinutes = Math.max(0, remainingTodayMinutes);
+    // In an actual deadline emergency, no usable time is too short. The
+    // planner must use even a final one-minute opening rather than leave it
+    // idle and pretend the work can wait.
+    return remainingEmergencyMinutes >= 1
+      ? Math.min(Math.max(1, roundToNearestFive(originalDurationMinutes)), remainingEmergencyMinutes)
+      : null;
   }
 
   const remainingBlockSlots = Math.max(0, recommendedBlockCount - scheduledBlocksSoFar - 1);
@@ -751,7 +948,17 @@ function getUpcomingMissionAssignments(
     .filter((assignment) => !excludedAssignmentIds?.has(assignment.id))
     .filter((assignment) => {
       const due = new Date(assignment.dueDate);
-      return due.getTime() <= end.getTime();
+      const remainingMinutes = assignment.remainingMinutes || assignment.estimatedMinutes || 0;
+      const daysUntilDue = getAssignmentDaysUntilDue(assignment, currentTime);
+      // Large finishable work must start well before it becomes "due soon".
+      // This guards against a student receiving new work or losing a future
+      // evening to an unexpected commitment.
+      const needsFoundationWork =
+        !isAssessmentAssignment(assignment) &&
+        remainingMinutes >= 600 &&
+        daysUntilDue >= 0 &&
+        daysUntilDue <= 45;
+      return due.getTime() <= end.getTime() || needsFoundationWork;
     })
     .sort((a, b) => scoreAssignmentForToday(b, currentTime) - scoreAssignmentForToday(a, currentTime));
 }
@@ -862,14 +1069,25 @@ function getAssignmentDaysUntilDue(assignment: Pick<MissionInputAssignment, "due
   return Math.round((dueUtc - currentUtc) / (24 * 60 * 60 * 1000));
 }
 
-function getSleepTargetClock(state?: StudentState) {
-  return state?.dailyMissionPlan?.sleepTarget || "22:30";
+function getSleepTargetClock(state?: StudentState, dateKey?: string) {
+  // A one-day override must not quietly become the assumed bedtime for every
+  // future day during deadline look-ahead.
+  if (state?.dailyMissionPlan && (!dateKey || state.dailyMissionPlan.date === dateKey)) {
+    return state.dailyMissionPlan.sleepTarget || "22:30";
+  }
+  return "22:30";
 }
 
-function getDayPlanningCapacityRange(dateKey: string, offsetMinutes: number, state: StudentState) {
+function getDayPlanningCapacityRange(
+  dateKey: string,
+  offsetMinutes: number,
+  state: StudentState,
+  sleepTargetOverride?: string,
+  startTimeOverride?: string,
+) {
   const midday = toPlanningDateTime(dateKey, "12:00", offsetMinutes);
   const dayOfWeek = midday.getDay();
-  const sleepTarget = getSleepTargetClock(state);
+  const sleepTarget = sleepTargetOverride || getSleepTargetClock(state, dateKey);
 
   if (dayOfWeek >= 1 && dayOfWeek <= 5) {
     const schoolSkipped = state.dailyMissionPlan?.date === dateKey && state.dailyMissionPlan.schoolMode === "skip";
@@ -881,33 +1099,197 @@ function getDayPlanningCapacityRange(dateKey: string, offsetMinutes: number, sta
 
   if (dayOfWeek === 6) {
     return {
-      start: toPlanningDateTime(dateKey, "10:30", offsetMinutes),
+      start: toPlanningDateTime(dateKey, startTimeOverride || "10:30", offsetMinutes),
       end: toPlanningDateTime(dateKey, sleepTarget, offsetMinutes),
     };
   }
 
   return {
-    start: toPlanningDateTime(dateKey, "08:00", offsetMinutes),
+    // Sunday morning is reserved for the fixed church routine.
+    start: toPlanningDateTime(dateKey, "13:00", offsetMinutes),
     end: toPlanningDateTime(dateKey, sleepTarget, offsetMinutes),
   };
 }
 
-function estimateAvailableMinutesForDate(state: StudentState, dateKey: string, offsetMinutes: number) {
-  const range = getDayPlanningCapacityRange(dateKey, offsetMinutes, state);
+function estimateAvailableMinutesForDate(
+  state: StudentState,
+  dateKey: string,
+  offsetMinutes: number,
+  options?: { currentTime?: string; sleepTargetOverride?: string; startTimeOverride?: string },
+) {
+  const range = getDayPlanningCapacityRange(
+    dateKey,
+    offsetMinutes,
+    state,
+    options?.sleepTargetOverride,
+    options?.startTimeOverride,
+  );
+  if (options?.currentTime && toDateKeyAtOffset(options.currentTime, offsetMinutes) === dateKey) {
+    const now = new Date(options.currentTime);
+    if (now.getTime() > range.start.getTime()) range.start.setTime(now.getTime());
+  }
   const totalMinutes = Math.max(0, Math.floor((range.end.getTime() - range.start.getTime()) / 60000));
   if (!totalMinutes) return 0;
 
-  const occupiedMinutes = normalizeCalendarEvents(state.calendar)
+  const occupiedRanges = normalizeCalendarEvents(state.calendar)
     .filter((event) => event.source !== "ai")
     .filter((event) => isOnPlanningDay(event.startTime, dateKey, offsetMinutes) || isOnPlanningDay(event.endTime, dateKey, offsetMinutes))
-    .reduce((total, event) => {
+    .map((event) => {
       const start = Math.max(new Date(event.startTime).getTime(), range.start.getTime());
       const end = Math.min(new Date(event.endTime).getTime(), range.end.getTime());
-      if (end <= start) return total;
-      return total + Math.floor((end - start) / 60000);
-    }, 0);
+      return end > start ? { start, end } : null;
+    })
+    .filter((item): item is { start: number; end: number } => Boolean(item))
+    .sort((a, b) => a.start - b.start);
+  let occupiedMinutes = 0;
+  let occupiedEnd = -Infinity;
+  for (const occupied of occupiedRanges) {
+    const start = Math.max(occupied.start, occupiedEnd);
+    if (occupied.end > start) occupiedMinutes += Math.floor((occupied.end - start) / 60000);
+    occupiedEnd = Math.max(occupiedEnd, occupied.end);
+  }
 
   return Math.max(0, totalMinutes - occupiedMinutes);
+}
+
+type DeadlineBedtimePolicy = {
+  effectiveSleepTarget: string;
+  lateMinutes: number;
+  shortageMinutes: number;
+  urgentWorkMinutes: number;
+};
+
+function toClockFromMinutes(minutes: number) {
+  const clamped = Math.max(0, Math.min(23 * 60 + 59, minutes));
+  return `${String(Math.floor(clamped / 60)).padStart(2, "0")}:${String(clamped % 60).padStart(2, "0")}`;
+}
+
+function getTrackedWorkRemainingMinutes(assignment: StudentState["assignments"][number]) {
+  if (assignment.assessmentType === "test" || assignment.assessmentType === "quiz") return 0;
+  const estimatedMinutes = Math.max(0, assignment.estimatedMinutes || 0);
+  const progressPercent = Math.max(0, Math.min(100, assignment.progress?.percentComplete || 0));
+  return Math.ceil(estimatedMinutes * ((100 - progressPercent) / 100));
+}
+
+type SaturdayWakePolicy = {
+  wakeTime: string;
+  earlyMinutes: number;
+  shortageMinutes: number;
+};
+
+/**
+ * Saturday uses 10:00 AM as the latest preferred wake time. It moves earlier
+ * only when real, finishable work due within three days cannot fit before its
+ * deadline, and only by the capacity actually required. This preserves sleep
+ * on ordinary Saturdays while preventing a lie-in from causing deadline harm.
+ */
+function getSaturdayWakePolicy(state: StudentState, currentTime: string): SaturdayWakePolicy {
+  const offsetMinutes = parsePlanningOffsetMinutes(currentTime);
+  const todayKey = currentTime.slice(0, 10);
+  const dayOfWeek = toPlanningDateTime(todayKey, "12:00", offsetMinutes).getDay();
+  if (dayOfWeek !== 6) return { wakeTime: "10:00", earlyMinutes: 0, shortageMinutes: 0 };
+
+  const urgentTrackedWork = state.assignments
+    .filter((assignment) => !assignment.completed)
+    .map((assignment) => ({
+      remainingMinutes: getTrackedWorkRemainingMinutes(assignment),
+      daysUntilDue: getAssignmentDaysUntilDue(assignment, currentTime),
+    }))
+    .filter(({ remainingMinutes, daysUntilDue }) => remainingMinutes > 0 && daysUntilDue >= 0 && daysUntilDue <= 3);
+  if (!urgentTrackedWork.length) return { wakeTime: "10:00", earlyMinutes: 0, shortageMinutes: 0 };
+
+  const latestDueDay = Math.max(...urgentTrackedWork.map((item) => item.daysUntilDue));
+  let cumulativeCapacityMinutes = 0;
+  let shortageMinutes = 0;
+  for (let dayOffset = 0; dayOffset <= latestDueDay; dayOffset += 1) {
+    const dateKey = addDaysToDateKey(todayKey, dayOffset, offsetMinutes);
+    cumulativeCapacityMinutes += estimateAvailableMinutesForDate(state, dateKey, offsetMinutes, {
+      currentTime: dayOffset === 0 ? currentTime : undefined,
+    });
+    const workDueByThisDay = urgentTrackedWork
+      .filter((item) => item.daysUntilDue <= dayOffset)
+      .reduce((total, item) => total + item.remainingMinutes, 0);
+    shortageMinutes = Math.max(shortageMinutes, workDueByThisDay - cumulativeCapacityMinutes);
+  }
+
+  // Never schedule a Saturday wake before 7:00 AM through this rule. If even
+  // that cannot cover the shortage, the Mission shows the remaining risk and
+  // relies on the separate bedtime/deadline emergency policy.
+  const earlyMinutes = Math.min(180, Math.max(0, Math.ceil(shortageMinutes / 30) * 30));
+  return {
+    wakeTime: toClockFromMinutes(10 * 60 - earlyMinutes),
+    earlyMinutes,
+    shortageMinutes: Math.max(0, shortageMinutes),
+  };
+}
+
+/**
+ * Protect the student's normal bedtime unless hard, finishable work due in the
+ * next three calendar days cannot fit in the real remaining pre-deadline
+ * capacity. This is intentionally deterministic: the AI never gets to decide
+ * whether sleep is sacrificed.
+ */
+function getDeadlineBedtimePolicy(state: StudentState, currentTime: string): DeadlineBedtimePolicy {
+  const offsetMinutes = parsePlanningOffsetMinutes(currentTime);
+  const todayKey = currentTime.slice(0, 10);
+  const normalSleepTarget = getSleepTargetClock(state, todayKey);
+  const urgentTrackedWork = state.assignments
+    .filter((assignment) => !assignment.completed)
+    .map((assignment) => ({
+      assignment,
+      remainingMinutes: getTrackedWorkRemainingMinutes(assignment),
+      daysUntilDue: getAssignmentDaysUntilDue(assignment, currentTime),
+    }))
+    .filter(({ remainingMinutes, daysUntilDue }) => remainingMinutes > 0 && daysUntilDue >= 0 && daysUntilDue <= 3);
+
+  if (!urgentTrackedWork.length) {
+    return { effectiveSleepTarget: normalSleepTarget, lateMinutes: 0, shortageMinutes: 0, urgentWorkMinutes: 0 };
+  }
+
+  const urgentWorkMinutes = urgentTrackedWork.reduce((total, item) => total + item.remainingMinutes, 0);
+  const latestDueDay = Math.max(...urgentTrackedWork.map((item) => item.daysUntilDue));
+  const saturdayWakePolicy = getSaturdayWakePolicy(state, currentTime);
+  let cumulativeCapacityMinutes = 0;
+  let shortageMinutes = 0;
+
+  for (let dayOffset = 0; dayOffset <= latestDueDay; dayOffset += 1) {
+    const dateKey = addDaysToDateKey(todayKey, dayOffset, offsetMinutes);
+    const isSaturdayToday = dayOffset === 0 && toPlanningDateTime(dateKey, "12:00", offsetMinutes).getDay() === 6;
+    cumulativeCapacityMinutes += estimateAvailableMinutesForDate(state, dateKey, offsetMinutes, {
+      currentTime: dayOffset === 0 ? currentTime : undefined,
+      sleepTargetOverride: normalSleepTarget,
+      startTimeOverride: isSaturdayToday
+        ? toClockFromMinutes((Number(saturdayWakePolicy.wakeTime.slice(0, 2)) * 60) + Number(saturdayWakePolicy.wakeTime.slice(3)) + 30)
+        : undefined,
+    });
+    const workDueByThisDay = urgentTrackedWork
+      .filter((item) => item.daysUntilDue <= dayOffset)
+      .reduce((total, item) => total + item.remainingMinutes, 0);
+    shortageMinutes = Math.max(shortageMinutes, workDueByThisDay - cumulativeCapacityMinutes);
+  }
+
+  shortageMinutes = Math.max(0, shortageMinutes);
+  if (!shortageMinutes) {
+    return { effectiveSleepTarget: normalSleepTarget, lateMinutes: 0, shortageMinutes: 0, urgentWorkMinutes };
+  }
+
+  const [sleepHour, sleepMinute] = normalSleepTarget.split(":").map(Number);
+  const normalSleepMinutes = sleepHour * 60 + sleepMinute;
+  // Keep this inside today's Mission. A capped extension is an emergency tool,
+  // not permission for an all-nighter; any remaining shortage stays visible for
+  // replanning and should trigger earlier work on future days.
+  const availableLateMinutes = Math.max(0, 23 * 60 + 59 - normalSleepMinutes);
+  const lateMinutes = Math.min(
+    availableLateMinutes,
+    Math.ceil(shortageMinutes / 15) * 15,
+  );
+
+  return {
+    effectiveSleepTarget: toClockFromMinutes(normalSleepMinutes + lateMinutes),
+    lateMinutes,
+    shortageMinutes,
+    urgentWorkMinutes,
+  };
 }
 
 function getLookaheadAdjustment(
@@ -935,8 +1317,20 @@ function getLookaheadAdjustment(
     futureAvailableMinutes += estimateAvailableMinutesForDate(state, dateKey, offsetMinutes);
   }
 
-  const shortageMinutes = Math.max(0, remainingMinutes - futureAvailableMinutes);
-  const forceFinishToday = daysUntilDue <= 2 && futureAvailableMinutes < Math.max(60, Math.round(remainingMinutes * 0.75));
+  // Capacity belongs to every real task due by this date, not just the
+  // assignment currently being scored. This avoids promising the same future
+  // evening to several large assignments at once.
+  const competingMinutes = state.assignments
+    .filter((candidate) => !candidate.completed && candidate.id !== assignment.id)
+    .filter((candidate) => candidate.assessmentType !== "test" && candidate.assessmentType !== "quiz")
+    .filter((candidate) => {
+      const candidateDaysUntilDue = getAssignmentDaysUntilDue(candidate, currentTime);
+      return candidateDaysUntilDue >= 0 && candidateDaysUntilDue <= daysUntilDue;
+    })
+    .reduce((total, candidate) => total + getTrackedWorkRemainingMinutes(candidate), 0);
+  const workDueByDeadline = remainingMinutes + competingMinutes;
+  const shortageMinutes = Math.max(0, workDueByDeadline - futureAvailableMinutes);
+  const forceFinishToday = daysUntilDue <= 2 && futureAvailableMinutes < Math.max(60, Math.round(workDueByDeadline * 0.75));
   const extraTodayMinutes = forceFinishToday
     ? remainingMinutes
     : shortageMinutes > 0
@@ -956,10 +1350,10 @@ function getPlanningWindow(currentTime: string) {
   const current = new Date(currentTime);
   const planningOffsetMinutes = parsePlanningOffsetMinutes(currentTime);
   const planningDayKey = currentTime.slice(0, 10);
-  const planningStart = toPlanningDateTime(planningDayKey, "05:30", planningOffsetMinutes);
-  if (current.getTime() > planningStart.getTime()) {
-    planningStart.setTime(current.getTime());
-  }
+  // The Mission starts at the real current time. Morning sleep is represented
+  // explicitly as a baseline block, so it can be released only for a genuine
+  // same-day deadline emergency instead of silently losing usable hours.
+  const planningStart = new Date(current);
 
   // Keep the whole remaining day visible. A fixed Sleep block protects the
   // normal bedtime, while genuine late commitments can still occupy later time.
@@ -1051,7 +1445,7 @@ function scoreAssignmentForToday(assignment: MissionInputAssignment, currentTime
   const effortScore = Math.min(30, Math.round(getMissionAssignmentTargetMinutes(assignment, currentTime) / 5));
   const planningPressureScore = assignment.planningPressureScore || 0;
 
-  return typeWeight + userPriorityWeight + urgencyScore + effortScore + planningPressureScore;
+  return typeWeight + userPriorityWeight + urgencyScore + effortScore + planningPressureScore + (assignment.weakSubjectPriorityBoost || 0);
 }
 
 function formatMissionAssignment(
@@ -1108,6 +1502,16 @@ function formatMissionAssignment(
         Math.round((assignment.estimatedMinutes || 45) * ((100 - Math.max(0, Math.min(100, assignment.progressPercent || 0))) / 100)),
       )
     : assessmentFramework?.remainingMinutes ?? Math.max(0, (assignment.estimatedMinutes || 45) - Math.max(0, assignment.studyMinutesCompleted || 0));
+  const subject = assignment.subject || assignment.course;
+  const grade = state?.grades.find((item) => normalizeText(item.subject) === normalizeText(subject));
+  const gradeGap = grade ? Math.max(0, grade.targetAverage - calculateGradeAverage(grade)) : 0;
+  const weakSubjectPriorityBoost = gradeGap > 0
+    ? Math.min(55, Math.round(gradeGap * 3) + (isAssessmentAssignment(assignment) && getAssignmentDaysUntilDue(assignment, currentTime) <= 7 ? 20 : 0))
+    : 0;
+  const proactiveFoundationWork =
+    planningStyle === "tracked-work" &&
+    remainingMinutes >= 600 &&
+    (trackedWorkFramework?.daysUntilDue ?? getAssignmentDaysUntilDue(assignment, currentTime)) <= 45;
   const suggestedStudyBlockMinutes = planningStyle === "assessment-prep"
     ? assessmentFramework?.preferredBlockMinutes ?? getRecommendedAssessmentStudyBlockMinutes({
         assessmentType: assignment.assessmentType,
@@ -1139,6 +1543,8 @@ function formatMissionAssignment(
       recommendedTodayMinutes,
       suggestedStudyBlockMinutes,
       planningPressureScore: lookahead.planningPressureScore,
+      weakSubjectPriorityBoost,
+      proactiveFoundationWork,
     }, currentTime);
 
     return {
@@ -1157,6 +1563,7 @@ function formatMissionAssignment(
       minimumStudyBlockMinutes: assessmentFramework?.minimumBlockMinutes,
       maximumStudyBlockMinutes: assessmentFramework?.maximumBlockMinutes,
       planningPressureScore: lookahead.planningPressureScore,
+      weakSubjectPriorityBoost,
       priority: assessmentScore >= 220 ? "high" : assessmentScore >= 160 ? "medium" : "low",
     };
   }
@@ -1184,6 +1591,8 @@ function formatMissionAssignment(
     preferredWorkBlockMinutes: trackedWorkFramework?.preferredBlockMinutes,
     shouldFinishToday,
     planningPressureScore: lookahead.planningPressureScore,
+    weakSubjectPriorityBoost,
+    proactiveFoundationWork,
   }, currentTime);
   return {
     ...assignment,
@@ -1199,8 +1608,45 @@ function formatMissionAssignment(
     maximumStudyBlockMinutes: trackedWorkFramework?.maximumBlockMinutes,
     shouldFinishToday,
     planningPressureScore: lookahead.planningPressureScore,
+    weakSubjectPriorityBoost,
+    proactiveFoundationWork,
     priority: score >= 220 ? "high" : score >= 160 ? "medium" : "low",
   };
+}
+
+function getEnergyModeAssignments(
+  state: StudentState,
+  currentTime: string,
+  planningAssignments: MissionInputAssignment[],
+) {
+  const byId = new Map(planningAssignments.map((assignment) => [assignment.id, assignment]));
+
+  state.assignments
+    .filter((assignment) => !assignment.completed)
+    .filter((assignment) => !isPlaceholderAssignment({
+      title: assignment.title,
+      course: assignment.course,
+      subject: assignment.subject,
+      notes: assignment.notes,
+    }))
+    .forEach((assignment) => {
+      if (byId.has(assignment.id)) return;
+      byId.set(assignment.id, formatMissionAssignment({
+        id: assignment.id,
+        title: assignment.title,
+        course: assignment.course,
+        subject: assignment.subject,
+        assessmentType: assignment.assessmentType,
+        dueDate: assignment.dueDate,
+        priority: assignment.priority,
+        estimatedMinutes: assignment.estimatedMinutes,
+        progressPercent: assignment.progress?.percentComplete,
+        studyMinutesCompleted: assignment.progress?.studyMinutesCompleted,
+        notes: assignment.notes,
+      }, currentTime, state));
+    });
+
+  return [...byId.values()];
 }
 
 function packMissionScheduleForDay(
@@ -1210,6 +1656,7 @@ function packMissionScheduleForDay(
   planningEnd: Date,
   assignments: MissionInputAssignment[],
   documents: MissionInputDocument[],
+  deadlineEmergency = false,
 ) {
   const fixedIds = new Set(fixedEvents.map((event) => event.id));
   const scheduledAssignmentMinutes = new Map<string, number>();
@@ -1218,6 +1665,10 @@ function packMissionScheduleForDay(
   const scheduledAssessmentBlocks = new Map<string, number>();
   const sortedEvents = [...events]
     .filter((event) => !fixedIds.has(event.id))
+    // The model may describe a break, sleep, or free time in its response,
+    // but only confirmed calendar data is allowed to create non-study blocks.
+    // The deterministic gap closer owns breaks and free time.
+    .filter((event) => event.type === "study")
     .filter((event) => isSpecificStudyEvent(event, assignments, documents))
     .sort((a, b) => b.priority - a.priority || new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
 
@@ -1253,6 +1704,7 @@ function packMissionScheduleForDay(
         relatedAssignment,
         scheduledMinutesSoFar,
         scheduledBlocksSoFar,
+        deadlineEmergency,
       );
 
       if (!constrainedDuration) {
@@ -1262,9 +1714,24 @@ function packMissionScheduleForDay(
       durationMinutes = constrainedDuration;
     }
 
-    const start = findNextOpenStart(cursor, durationMinutes, fixedEvents);
+    // Emergency work is deliberately split at fixed-event boundaries. Look
+    // for the first open minute first, then trim the block to that window.
+    const start = findNextOpenStart(
+      cursor,
+      deadlineEmergency ? 1 : durationMinutes,
+      fixedEvents,
+      deadlineEmergency ? 0 : 10,
+    );
+    const availableMinutes = deadlineEmergency
+      ? getAvailableMinutesUntilNextFixedEvent(start, planningEnd, fixedEvents)
+      : Math.max(0, Math.floor((planningEnd.getTime() - start.getTime()) / 60000));
+    if (availableMinutes < durationMinutes) {
+      // A hard deadline may leave a useful short final window. Use it rather
+      // than abandoning the task simply because its preferred block is longer.
+      if (!relatedAssignment?.shouldFinishToday || (availableMinutes < 20 && !deadlineEmergency) || availableMinutes < 1) break;
+      durationMinutes = availableMinutes;
+    }
     const end = addMinutes(start, durationMinutes);
-    if (end.getTime() > planningEnd.getTime()) break;
 
     packed.push({
       ...event,
@@ -1303,7 +1770,7 @@ function packMissionScheduleForDay(
       );
     }
 
-    cursor = addMinutes(end, 10);
+    cursor = addMinutes(end, deadlineEmergency ? 0 : 10);
   }
 
   const assessmentTopUpCandidates = assignments
@@ -1334,7 +1801,7 @@ function packMissionScheduleForDay(
         .sort((a, b) => new Date(a.endTime).getTime() - new Date(b.endTime).getTime())
         .at(-1);
       const searchStart = lastAssignmentBlock
-        ? addMinutes(new Date(lastAssignmentBlock.endTime), 10)
+        ? addMinutes(new Date(lastAssignmentBlock.endTime), deadlineEmergency ? 0 : 10)
         : new Date(planningStart);
       const start = findNextOpenStart(searchStart, durationMinutes, [...fixedEvents, ...packed]);
       const end = addMinutes(start, durationMinutes);
@@ -1364,7 +1831,7 @@ function packMissionScheduleForDay(
     .filter((assignment) => assignment.planningStyle === "tracked-work")
     .filter((assignment) => {
       const scheduledMinutes = scheduledAssignmentMinutes.get(assignment.id) || 0;
-      return scheduledMinutes > 0 || assignment.shouldFinishToday;
+      return scheduledMinutes > 0 || assignment.shouldFinishToday || assignment.proactiveFoundationWork;
     })
     .sort((a, b) => scoreAssignmentForToday(b, planningStart.toISOString()) - scoreAssignmentForToday(a, planningStart.toISOString()));
 
@@ -1382,11 +1849,12 @@ function packMissionScheduleForDay(
             remainingTargetMinutes || assignment.remainingMinutes || 45,
           )
         : assignment.preferredWorkBlockMinutes || remainingTargetMinutes || 45;
-      const durationMinutes = getConstrainedTrackedWorkEventDuration(
+      let durationMinutes = getConstrainedTrackedWorkEventDuration(
         seedDuration,
         assignment,
         scheduledMinutesSoFar,
         scheduledBlocksSoFar,
+        deadlineEmergency,
       );
 
       if (!durationMinutes) {
@@ -1398,14 +1866,22 @@ function packMissionScheduleForDay(
         .sort((a, b) => new Date(a.endTime).getTime() - new Date(b.endTime).getTime())
         .at(-1);
       const searchStart = lastAssignmentBlock
-        ? addMinutes(new Date(lastAssignmentBlock.endTime), 10)
+        ? addMinutes(new Date(lastAssignmentBlock.endTime), deadlineEmergency ? 0 : 10)
         : new Date(planningStart);
-      const start = findNextOpenStart(searchStart, durationMinutes, [...fixedEvents, ...packed]);
-      const end = addMinutes(start, durationMinutes);
-
-      if (end.getTime() > planningEnd.getTime()) {
-        break;
+      const start = findNextOpenStart(
+        searchStart,
+        deadlineEmergency ? 1 : durationMinutes,
+        [...fixedEvents, ...packed],
+        deadlineEmergency ? 0 : 10,
+      );
+      const availableMinutes = deadlineEmergency
+        ? getAvailableMinutesUntilNextFixedEvent(start, planningEnd, [...fixedEvents, ...packed])
+        : Math.max(0, Math.floor((planningEnd.getTime() - start.getTime()) / 60000));
+      if (availableMinutes < durationMinutes) {
+        if (!assignment.shouldFinishToday || (availableMinutes < 20 && !deadlineEmergency) || availableMinutes < 1) break;
+        durationMinutes = availableMinutes;
       }
+      const end = addMinutes(start, durationMinutes);
 
       packed.push({
         id: crypto.randomUUID(),
@@ -1460,7 +1936,12 @@ function overlapsFixedEvent(start: Date, end: Date, fixedEvents: CalendarEvent[]
   });
 }
 
-function findNextOpenStart(start: Date, minutes: number, fixedEvents: CalendarEvent[]) {
+function findNextOpenStart(
+  start: Date,
+  minutes: number,
+  fixedEvents: CalendarEvent[],
+  bufferAfterFixedMinutes = 10,
+) {
   let cursor = new Date(start);
 
   for (let attempt = 0; attempt < 24; attempt += 1) {
@@ -1472,10 +1953,26 @@ function findNextOpenStart(start: Date, minutes: number, fixedEvents: CalendarEv
     });
 
     if (!overlapping) return cursor;
-    cursor = addMinutes(new Date(overlapping.endTime), 10);
+    cursor = addMinutes(new Date(overlapping.endTime), bufferAfterFixedMinutes);
   }
 
   return cursor;
+}
+
+function getAvailableMinutesUntilNextFixedEvent(
+  start: Date,
+  planningEnd: Date,
+  fixedEvents: CalendarEvent[],
+) {
+  const nextFixedStart = fixedEvents
+    .map((event) => new Date(event.startTime))
+    .filter((fixedStart) => fixedStart.getTime() > start.getTime())
+    .sort((a, b) => a.getTime() - b.getTime())
+    .at(0);
+  const boundary = nextFixedStart && nextFixedStart.getTime() < planningEnd.getTime()
+    ? nextFixedStart
+    : planningEnd;
+  return Math.max(0, Math.floor((boundary.getTime() - start.getTime()) / 60000));
 }
 
 function buildRecoveryBreak(start: Date, minutes: number, createdAt: string): CalendarEvent {
@@ -1534,6 +2031,7 @@ function closeMissionScheduleGaps(
   planningStart: Date,
   planningEnd: Date,
   createdAt: string,
+  deadlineEmergency = false,
 ) {
   const ordered = sortMissionSchedule(schedule).map((event) => ({ ...event }));
   const sealed: CalendarEvent[] = [];
@@ -1553,7 +2051,11 @@ function closeMissionScheduleGaps(
       const gapEnd = new Date(start);
       const previous = sealed.at(-1);
 
-      if (previous && isReplaceableMissionBlock(previous)) {
+      if (deadlineEmergency && previous?.type === "study") {
+        // Preserve every last usable moment before a fixed commitment rather
+        // than turning a tiny remainder into an artificial reset block.
+        previous.endTime = gapEnd.toISOString();
+      } else if (previous && isReplaceableMissionBlock(previous)) {
         previous.endTime = gapEnd.toISOString();
       } else if (isReplaceableMissionBlock(event)) {
         event.startTime = gapStart.toISOString();
@@ -1579,7 +2081,9 @@ function closeMissionScheduleGaps(
     }
   }
 
-  return normalizeCalendarEvents(insertRequiredStudyBreaks(sealed, createdAt));
+  return normalizeCalendarEvents(
+    deadlineEmergency ? sealed : insertRequiredStudyBreaks(sealed, createdAt),
+  );
 }
 
 function insertRequiredStudyBreaks(schedule: CalendarEvent[], createdAt: string) {
@@ -2336,7 +2840,8 @@ function addWeakSubjectStudyBlocks(
 ) {
   const isAutomaticWeakSubjectReview = (event: CalendarEvent) =>
     event.source === "ai" && state.grades.some(
-      (grade) => normalizeText(event.title) === `review ${normalizeText(grade.subject)} weak topics`,
+      (grade) => /^review (?:.+) (?:weak topics|recent material)$/i.test(event.title) &&
+        normalizeText(event.title).includes(normalizeText(grade.subject)),
     );
   // The deterministic rules below own optional weak-subject review, even when AI produced a draft.
   const scheduleWithoutAutomaticWeakSubjectReviews = schedule.filter(
@@ -2375,6 +2880,7 @@ function addWeakSubjectStudyBlocks(
       subject: grade.subject,
       average: calculateGradeAverage(grade),
       target: grade.targetAverage,
+      gap: Math.max(0, grade.targetAverage - calculateGradeAverage(grade)),
     }))
     .filter((grade) => grade.average < grade.target)
     .sort((a, b) => (a.average - a.target) - (b.average - b.target));
@@ -2385,11 +2891,51 @@ function addWeakSubjectStudyBlocks(
     : 1;
   let nextSchedule = sortMissionSchedule(scheduleWithoutAutomaticWeakSubjectReviews);
   let addedBlocks = 0;
+  const now = new Date(currentTime).getTime();
+  const oneDayAgo = now - 24 * 60 * 60 * 1000;
+  const twoDaysAgo = now - 2 * 24 * 60 * 60 * 1000;
+  const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
 
   for (const weakSubject of weakSubjects) {
     if (addedBlocks >= maxBlocks) break;
-    const title = `Review ${weakSubject.subject} weak topics`;
     if (nextSchedule.some((event) => normalizeText(event.title).includes(normalizeText(weakSubject.subject)))) continue;
+
+    const subjectKey = normalizeText(weakSubject.subject);
+    const upcomingAssessment = assignments
+      .filter((assignment) => isAssessmentAssignment(assignment))
+      .filter((assignment) => normalizeText(assignment.subject || assignment.course) === subjectKey)
+      .filter((assignment) => (assignment.daysUntilDue ?? 99) >= 0 && (assignment.daysUntilDue ?? 99) <= 7)
+      .sort((a, b) => (a.daysUntilDue ?? 99) - (b.daysUntilDue ?? 99))
+      .at(0);
+    const sessionsThisWeek = state.studySessions.filter((session) =>
+      normalizeText(session.subject) === subjectKey && new Date(session.createdAt).getTime() >= oneWeekAgo,
+    ).length;
+    const studiedInLastDay = state.studySessions.some((session) =>
+      normalizeText(session.subject) === subjectKey && new Date(session.createdAt).getTime() >= oneDayAgo,
+    );
+    const hasRecentMaterial = state.documents.some((document) =>
+      normalizeText(document.subject) === subjectKey && new Date(document.uploadedAt).getTime() >= twoDaysAgo,
+    );
+    const maintenanceSessionsPerWeek = weakSubject.gap >= 12 || weakSubject.average < 60 ? 3 : 2;
+
+    let title: string;
+    let durationTarget = 35;
+    let priority = 2;
+    if (upcomingAssessment) {
+      // Assessment prep ramps up through the existing slice framework; this
+      // extra rule makes a weak subject win discretionary time as the date nears.
+      title = `Prepare for ${upcomingAssessment.title.replace(/^prepare for\s+/i, "")}`;
+      durationTarget = 45;
+      priority = 6;
+    } else if (hasRecentMaterial && !studiedInLastDay) {
+      title = `Review ${weakSubject.subject} recent material`;
+      durationTarget = 30;
+      priority = 4;
+    } else if (sessionsThisWeek < maintenanceSessionsPerWeek && !studiedInLastDay) {
+      title = `Review ${weakSubject.subject} weak topics`;
+    } else {
+      continue;
+    }
 
     const replaceable = nextSchedule.find((event) =>
       isReplaceableMissionBlock(event) &&
@@ -2399,7 +2945,7 @@ function addWeakSubjectStudyBlocks(
     if (!replaceable) break;
 
     const start = new Date(Math.max(new Date(replaceable.startTime).getTime(), new Date(currentTime).getTime()));
-    const durationMinutes = Math.min(35, Math.floor((new Date(replaceable.endTime).getTime() - start.getTime()) / 60000));
+    const durationMinutes = Math.min(durationTarget, Math.floor((new Date(replaceable.endTime).getTime() - start.getTime()) / 60000));
     if (durationMinutes < 30) continue;
     const end = addMinutes(start, durationMinutes);
     const before = new Date(replaceable.startTime).getTime() < start.getTime()
@@ -2418,7 +2964,7 @@ function addWeakSubjectStudyBlocks(
         type: "study",
         startTime: start.toISOString(),
         endTime: end.toISOString(),
-        priority: 2,
+        priority,
         createdAt: currentTime,
         source: "ai",
       },
@@ -2669,6 +3215,22 @@ function adaptMissionForEnergy(
     .sort((a, b) => b.priority - a.priority);
 
   if (energyMode === "recovery") {
+    const deadlineCriticalEvents = currentStudyEvents.filter((event) =>
+      Boolean(resolveRelatedAssignmentForEvent(event, assignments)?.shouldFinishToday),
+    );
+
+    if (deadlineCriticalEvents.length) {
+      // Low energy changes pacing, but it must never silently discard work that
+      // the deterministic deadline framework has established must finish today.
+      mission.energyLevel = "low";
+      mission.focusScore = Math.min(mission.focusScore, 4);
+      mission.summary = "Recovery mode protected essential pacing, but AcademicOS kept all work that must finish today because of its deadline.";
+      mission.schedule = [...fixedEvents, ...deadlineCriticalEvents]
+        .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+      mission.expectedFinishTime = mission.schedule.at(-1)?.endTime || mission.currentTime;
+      return mission;
+    }
+
     const reducedStudyEvents = currentStudyEvents.slice(0, 1).map((event) => {
       const start = new Date(event.startTime);
       const originalEnd = new Date(event.endTime);
@@ -2682,44 +3244,25 @@ function adaptMissionForEnergy(
         priority: Math.max(event.priority, 8),
       };
     });
-    const recoveryStart = reducedStudyEvents.length
-      ? new Date(reducedStudyEvents[0].endTime)
-      : addMinutes(new Date(mission.currentTime), 10);
-    const recoveryBlocks = [buildRecoveryBreak(recoveryStart, reducedStudyEvents.length ? 30 : 45, mission.createdAt)];
-
     mission.energyLevel = "low";
     mission.focusScore = Math.min(mission.focusScore, 4);
     mission.burnoutRisk = Math.max(mission.burnoutRisk, 7);
-    mission.summary = reducedStudyEvents.length
-      ? "Recovery mode applied. AcademicOS kept only the most important work, shortened it, and added protected recovery time."
-      : "Recovery mode applied. AcademicOS protected rest because there is no specific academic task available to schedule.";
-    mission.schedule = [
-      ...fixedEvents,
-      ...reducedStudyEvents,
-      ...recoveryBlocks.filter((event) => !overlapsFixedEvent(new Date(event.startTime), new Date(event.endTime), fixedEvents)),
-    ].sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+    if (!reducedStudyEvents.length) {
+      mission.summary = "Low energy noted. There is no urgent academic work that fits in the remaining open time, so AcademicOS kept the existing commitments and available recovery time.";
+      mission.schedule = [...fixedEvents].sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+    } else {
+      const recoveryStart = new Date(reducedStudyEvents[0].endTime);
+      const recoveryBlocks = [buildRecoveryBreak(recoveryStart, 30, mission.createdAt)];
+      mission.summary = "Recovery mode applied. AcademicOS kept the most important work, shortened it, and added protected recovery time.";
+      mission.schedule = [
+        ...fixedEvents,
+        ...reducedStudyEvents,
+        ...recoveryBlocks.filter((event) => !overlapsFixedEvent(new Date(event.startTime), new Date(event.endTime), fixedEvents)),
+      ].sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+    }
   }
 
   if (energyMode === "high-output") {
-    const scheduledAssignmentIds = new Set(
-      currentStudyEvents
-        .map((event) => event.relatedAssignmentId)
-        .filter(Boolean)
-    );
-    const nextAssignment = assignments.find((assignment) => !scheduledAssignmentIds.has(assignment.id));
-    const expandedStudyEvents = currentStudyEvents.map((event) => {
-      const start = new Date(event.startTime);
-      const originalEnd = new Date(event.endTime);
-      const originalMinutes = Math.max(25, Math.round((originalEnd.getTime() - start.getTime()) / 60000));
-      const expandedMinutes = Math.min(75, Math.max(40, Math.ceil(originalMinutes * 1.25)));
-
-      return {
-        ...event,
-        title: event.title.includes("deep work") ? event.title : `${event.title} (deep work)`,
-        endTime: addMinutes(start, expandedMinutes).toISOString(),
-        priority: Math.max(event.priority, 8),
-      };
-    });
     const retainedNonStudyEvents = mission.schedule.filter(
       (event) => !fixedIds.has(event.id) && event.type !== "study",
     );
@@ -2730,14 +3273,19 @@ function adaptMissionForEnergy(
     mission.energyLevel = "high";
     mission.focusScore = Math.max(mission.focusScore, 8);
     mission.burnoutRisk = Math.min(mission.burnoutRisk, 4);
-    mission.summary = nextAssignment
-      ? "High-output mode applied. AcademicOS extended focused work and added one get-ahead block so future low-energy days can be lighter."
-      : "High-output mode applied. AcademicOS extended today's focused work without inventing extra assignments.";
-    mission.schedule = addHighEnergyPriorityWork([
+    const studyMinutesBefore = getStudyMinutes(mission.schedule, fixedEvents);
+    const highOutputSchedule = addHighEnergyPriorityWork([
       ...fixedEvents,
       ...retainedNonStudyEvents,
-      ...expandedStudyEvents,
+      ...currentStudyEvents,
     ], fixedEvents, assignments, mission.currentTime, highEnergyTargetMinutes);
+    const studyMinutesAfter = getStudyMinutes(highOutputSchedule, fixedEvents);
+    const addedMinutes = Math.max(0, studyMinutesAfter - studyMinutesBefore);
+
+    mission.summary = addedMinutes
+      ? "High-output mode applied. AcademicOS filled the available time with the highest-priority real academic work that fits before your next fixed commitment."
+      : "High energy noted. There is no real academic work and open window large enough to add before the next fixed commitment.";
+    mission.schedule = highOutputSchedule;
   }
 
   const lastEvent = mission.schedule[mission.schedule.length - 1];
@@ -2758,6 +3306,81 @@ function applyAuthoritativeMentalState(
   mission.focusScore = manualMentalState.focusScore;
   mission.burnoutRisk = deriveBurnoutRiskFromState(state, assignments, currentTime, mission.schedule || []);
 
+  return mission;
+}
+
+function applyBurnoutSafeguards(
+  mission: Mission,
+  state: StudentState,
+  assignments: MissionInputAssignment[],
+  currentTime: string,
+) {
+  const burnoutRisk = deriveBurnoutRiskFromState(state, assignments, currentTime, mission.schedule || []);
+  if (burnoutRisk < 5) return mission;
+
+  const fixedEvents = mission.schedule.filter((event) => isFixedCalendarEvent(event));
+  const fixedIds = new Set(fixedEvents.map((event) => event.id));
+  const recoveryMinutes = burnoutRisk >= 7 ? 25 : 15;
+  const adjustedSchedule = mission.schedule.flatMap((event) => {
+    if (fixedIds.has(event.id) || event.type !== "study") return [event];
+
+    const assignment = resolveRelatedAssignmentForEvent(event, assignments);
+    const daysUntilDue = assignment?.daysUntilDue ?? 99;
+    const requiredToday = Boolean(assignment?.shouldFinishToday || daysUntilDue <= 1);
+    const optionalReview = /^review .+ weak topics$/i.test(event.title);
+
+    // Recovery mode removes optional review and get-ahead work before touching
+    // anything that protects a near deadline.
+    if (optionalReview || (burnoutRisk >= 7 && !requiredToday)) return [];
+
+    if (!requiredToday) {
+      const cappedMinutes = burnoutRisk >= 7 ? 25 : 40;
+      if (getEventDurationMinutes(event) > cappedMinutes) {
+        return [{
+          ...event,
+          endTime: addMinutes(new Date(event.startTime), cappedMinutes).toISOString(),
+        }];
+      }
+    }
+
+    return [event];
+  });
+
+  // Recovery blocks replace immediately available free/open time after work.
+  // They never displace a fixed event or deadline-critical study session.
+  let withRecovery = sortMissionSchedule(adjustedSchedule);
+  let recoveryBlocksAdded = 0;
+  for (const studyEvent of [...withRecovery]) {
+    if (recoveryBlocksAdded >= 2 || studyEvent.type !== "study") continue;
+    const studyEnd = new Date(studyEvent.endTime).getTime();
+    const recoveryWindow = withRecovery.find((event) =>
+      isReplaceableMissionBlock(event) &&
+      new Date(event.startTime).getTime() <= studyEnd &&
+      new Date(event.endTime).getTime() - studyEnd >= recoveryMinutes * 60 * 1000,
+    );
+    if (!recoveryWindow) continue;
+
+    const recoveryStart = new Date(Math.max(studyEnd, new Date(recoveryWindow.startTime).getTime()));
+    const recoveryEnd = addMinutes(recoveryStart, recoveryMinutes);
+    const before = new Date(recoveryWindow.startTime).getTime() < recoveryStart.getTime()
+      ? [{ ...recoveryWindow, id: `${recoveryWindow.id}:before:${crypto.randomUUID()}`, endTime: recoveryStart.toISOString() }]
+      : [];
+    const after = new Date(recoveryWindow.endTime).getTime() > recoveryEnd.getTime()
+      ? [{ ...recoveryWindow, id: `${recoveryWindow.id}:after:${crypto.randomUUID()}`, startTime: recoveryEnd.toISOString() }]
+      : [];
+
+    withRecovery = sortMissionSchedule([
+      ...withRecovery.filter((event) => event.id !== recoveryWindow.id),
+      ...before,
+      buildRecoveryBreak(recoveryStart, recoveryMinutes, currentTime),
+      ...after,
+    ]);
+    recoveryBlocksAdded += 1;
+  }
+
+  mission.schedule = withRecovery;
+  mission.summary = `${mission.summary} Sustained burnout risk is ${burnoutRisk}/10, so AcademicOS protected deadline-critical work while reducing optional work and reserving recovery time.`;
+  mission.burnoutRisk = burnoutRisk;
   return mission;
 }
 
@@ -2791,6 +3414,7 @@ export async function POST(req: Request) {
     const { input, currentTime, timeZone, mode, action, eventId } = await req.json();
     fallbackCurrentTime = currentTime || fallbackCurrentTime;
     let state = await getState();
+    state = await updateState((currentState) => recordWellbeingCheckIn(currentState, fallbackCurrentTime));
     const requestMode = typeof mode === "string" ? mode : "replan";
     const manualMentalState = getAuthoritativeMentalState(state, fallbackCurrentTime);
     const energyMode = manualMentalState.energyMode;
@@ -2929,7 +3553,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { planningDayKey, planningStart, planningEnd, planningOffsetMinutes, fixedEvents: fixedCalendar } =
+    const { planningDayKey, planningStart, planningEnd, planningOffsetMinutes, bedtimePolicy, deadlineEmergencyPolicy, fixedEvents: fixedCalendar } =
       buildFixedMissionScheduleForDay(state, currentTime);
 
     if (requestMode === "quick-update" && state.currentMission) {
@@ -3070,7 +3694,7 @@ export async function POST(req: Request) {
         currentTime,
       );
 
-      const finalMission = applyAuthoritativeMentalState({
+      let finalMission = applyAuthoritativeMentalState({
         ...baseMission,
         schedule: budgetedQuickUpdateSchedule,
         expectedFinishTime: budgetedQuickUpdateSchedule.at(-1)?.endTime || baseMission.currentTime,
@@ -3080,6 +3704,22 @@ export async function POST(req: Request) {
         reason: amended.inserted
           ? `Quick update added: ${amended.inserted.title}`
           : "Quick update kept the existing mission plan.",
+      }, state, quickAssignments, currentTime);
+      applyBurnoutSafeguards(finalMission, state, quickAssignments, currentTime);
+      finalMission = applyAuthoritativeMentalState({
+        ...finalMission,
+        schedule: closeMissionScheduleGaps(
+          constrainScheduleToPlanningDay(
+            finalMission.schedule,
+            planningStart,
+            planningEnd,
+            planningDayKey,
+            planningOffsetMinutes,
+          ),
+          planningStart,
+          planningEnd,
+          currentTime,
+        ),
       }, state, quickAssignments, currentTime);
 
       await updateState((state) => {
@@ -3532,6 +4172,8 @@ Every study block must name the exact assignment, course, document, or subject b
 
 27.75. A course below its target average may receive a specific low-priority review block only when every provided assignment, homework, project, test, and quiz has its required work for today scheduled. Use genuinely spare time only, never displace real deadline work, and only when the manual energy level is medium or high and burnout risk permits it. Name the exact course, such as "Review Chemistry weak topics"; never use a vague study block.
 
+27.8. Weak-subject work is proactive discretionary study, not a replacement for deadline work. For a weak subject: an upcoming test or quiz should receive the strongest boost and spaced preparation across the available days; recently added course material should receive a short active-recall review within one or two days; and continuing weakness should receive two or three maintenance reviews per week depending on the size of the grade gap. Never sacrifice a required assignment, project, homework item, or imminent assessment to create generic review. Use specific titles that name the subject and purpose, such as "Review Chemistry recent material" or "Prepare for Chemistry Unit Test".
+
 28. When the user asks generally to "work on an assignment", "do homework", or "work on a project", choose the assignment with the strongest combination of urgency, priority, and remaining work. Do not choose a low-value task over a more urgent due-soon task.
 
 29. If the user says they are tired, exhausted, stressed, overwhelmed, or low energy, you must change the actual schedule:
@@ -3540,14 +4182,18 @@ Every study block must name the exact assignment, course, document, or subject b
 - shorten study sessions to 15-25 minutes
 - add recovery breaks
 - do not merely tell the user to consider managing time
+- if no real academic task fits, keep the existing commitments and let the deterministic planner provide free time; do not invent a rest appointment or an earlier sleep block
 
 30. If the user says they have high energy, feel productive, motivated, locked in, or can do more, you must change the actual schedule:
 - extend useful study blocks when they are tied to real assignments/documents
 - optionally add one get-ahead task from assignments due later
 - do not invent any work
 - preserve future sustainability by not overloading the day
+- only call this high-output mode when you actually scheduled real academic work in an open window; never label free time or sleep as high output
 
 31. Required work comes before optional get-ahead work. First make overdue work safe, protect work due soon, prepare upcoming tests, make reasonable progress on large assignments, and provide any eligible weak-subject review. Only then look ahead up to roughly two weeks for real known tests, large assignments/projects, weaker subjects, or smaller upcoming assignments. Do not fill every free hour and do not invent future material.
+
+31.5. A large unfinished assignment, homework item, or project with at least 600 minutes remaining is not optional just because its deadline is weeks away. On a medium or high energy day with low-to-moderate stress and an open window, reserve a sensible foundation-work block before free time. This is a risk buffer for surprise commitments, not permission to overload the day. A fully free day is appropriate only when there is no meaningful unfinished schoolwork or the student’s mental-health safeguards require recovery.
 
 32. Prefer uninterrupted focused work: use 45-75 minute blocks by default and 60-90 minutes for substantial work or deep studying. Use a 20-30 minute block only when little work remains, the open window is genuinely short, energy is low, or the task is genuinely short. Do not split a meaningful session into several short blocks without a scheduling reason.
 
@@ -3556,6 +4202,14 @@ Every study block must name the exact assignment, course, document, or subject b
 34. Space meaningful test preparation across days whenever earlier preparation is possible. Start large assignments early and use lower grades as a tie-breaker between otherwise similar academic work. Deadlines and major assessments always override this tie-breaker.
 
 35. After every 60 minutes of uninterrupted study, include a five-minute "Short study break" before more study continues. This is mandatory for consecutive study, but do not add a redundant break when the student is switching to free time, a fixed event, or another non-study activity.
+
+36. Sleep is protected by a deterministic capacity policy. The supplied sleepPolicy is authoritative: preserve its effectiveSleepTarget exactly. When it is later than the normal target, that extension is only for real finishable assignments, homework, or projects due within three days that cannot otherwise fit before their deadlines. Do not fill that extension with optional study, test preparation, weak-subject review, or free time.
+
+37. Never ask the student to decide whether to work or sleep. When a tracked-work assignment has shouldFinishToday = true and at least 20 minutes remain before the fixed sleep boundary, schedule that real assignment for the available time, even if it is shorter than the preferred work block. Report any remaining work plainly; do not return an empty plan or request a wake/sleep decision.
+
+38. When deadlineEmergency.active is true, a real assignment, homework item, or project is due today with unfinished tracked work. Its completion takes priority over sleep, breaks, free time, optional study, energy, focus, and burnout preferences. Treat only confirmed fixed calendar events as immovable. Schedule the affected tracked work into every other available minute until it is complete or the day ends. Do not add padding or optional blocks in this mode. If confirmed fixed commitments make completion mathematically impossible, report the exact shortfall plainly.
+
+39. Mission displays only the current day. If a same-day deadline cannot physically fit after every current-day non-fixed minute has been used, do not invent a later completion today or abandon the work. Its persistent unfinished progress makes it the first academic priority in the next day's first available non-fixed window. On that next day, schedule it before sleep, free time, optional study, wellbeing adjustments, and every lower-priority academic item. Use even a one-minute final opening on the due day rather than leaving it unused.
 
       `
         },
@@ -3581,6 +4235,13 @@ Every study block must name the exact assignment, course, document, or subject b
               energyLevel: manualMentalState.energyLevel,
               focusScore: manualMentalState.focusScore,
               stressLevel: manualMentalState.stressLevel,
+            },
+
+            sleepPolicy: bedtimePolicy,
+
+            deadlineEmergency: {
+              active: deadlineEmergencyPolicy.active,
+              assignmentIds: [...deadlineEmergencyPolicy.assignmentIds],
             },
 
             documents: missionDocuments,
@@ -3637,6 +4298,7 @@ Every study block must name the exact assignment, course, document, or subject b
           planningEnd,
           missionAssignments,
           missionDocuments,
+          deadlineEmergencyPolicy.active,
         );
 
     mission.schedule = closeMissionScheduleGaps(
@@ -3653,12 +4315,15 @@ Every study block must name the exact assignment, course, document, or subject b
       planningStart,
       planningEnd,
       currentTime,
+      deadlineEmergencyPolicy.active,
     );
 
-    adaptMissionForEnergy(mission, fixedEvents, missionAssignments, energyMode, manualMentalState);
-    mission.schedule = enforceAssignmentTimeBudgets(mission.schedule, missionAssignments);
+    const energyModeAssignments = getEnergyModeAssignments(state, currentTime, missionAssignments);
+    adaptMissionForEnergy(mission, fixedEvents, energyModeAssignments, energyMode, manualMentalState);
+    mission.schedule = enforceAssignmentTimeBudgets(mission.schedule, energyModeAssignments);
     mission.schedule = addWeakSubjectStudyBlocks(mission.schedule, missionAssignments, state, currentTime);
     applyAuthoritativeMentalState(mission, state, missionAssignments, currentTime);
+    applyBurnoutSafeguards(mission, state, energyModeAssignments, currentTime);
     mission.schedule = closeMissionScheduleGaps(
       constrainScheduleToPlanningDay(
         mission.schedule,
@@ -3670,11 +4335,18 @@ Every study block must name the exact assignment, course, document, or subject b
       planningStart,
       planningEnd,
       currentTime,
+      deadlineEmergencyPolicy.active,
     );
+    applyAuthoritativeMentalState(mission, state, missionAssignments, currentTime);
     const sortedMission = sortMission(mission);
     const finalMission = {
       ...sortedMission,
       expectedFinishTime: sortedMission.schedule.at(-1)?.endTime || sortedMission.currentTime,
+      summary: deadlineEmergencyPolicy.active
+        ? buildDeadlineEmergencySummary(sortedMission.schedule, missionAssignments, deadlineEmergencyPolicy)
+        : bedtimePolicy.lateMinutes > 0
+        ? `${sortedMission.summary} Bedtime was extended to ${bedtimePolicy.effectiveSleepTarget} because confirmed near-deadline work exceeds normal pre-deadline capacity.`
+        : sortedMission.summary,
     };
     const missionWithReason = {
       ...finalMission,

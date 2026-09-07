@@ -489,17 +489,70 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const addStudySession = useCallback(
     (data: Omit<StudySession, "id" | "createdAt">) => {
-      commitStudentState((prev) => ({
-        ...prev,
-        studySessions: [
-          {
-            ...data,
-            id: generateId(),
-            createdAt: new Date().toISOString(),
-          },
-          ...prev.studySessions,
-        ],
-      }));
+      const now = new Date().toISOString();
+      commitStudentState((prev) => {
+        const completedMinutes = Math.max(0, Math.round(data.durationMinutes));
+        const assignments = data.relatedAssignmentId
+          ? prev.assignments.map((assignment) => {
+              if (assignment.id !== data.relatedAssignmentId || assignment.completed || !completedMinutes) {
+                return assignment;
+              }
+
+              const existingProgress = assignment.progress || {
+                percentComplete: 0,
+                completedSteps: [],
+                remainingSteps: [],
+                studyMinutesCompleted: 0,
+                lastUpdatedAt: now,
+              };
+              const isAssessment = assignment.assessmentType === "test" || assignment.assessmentType === "quiz";
+
+              if (isAssessment) {
+                return {
+                  ...assignment,
+                  status: "in-progress" as const,
+                  progress: {
+                    ...existingProgress,
+                    studyMinutesCompleted: (existingProgress.studyMinutesCompleted || 0) + completedMinutes,
+                    lastUpdatedAt: now,
+                  },
+                  updatedAt: now,
+                };
+              }
+
+              const estimatedMinutes = Math.max(15, assignment.estimatedMinutes || 45);
+              const nextPercent = Math.min(
+                99,
+                Math.round((existingProgress.percentComplete || 0) + (completedMinutes / estimatedMinutes) * 100),
+              );
+              return {
+                ...assignment,
+                status: "in-progress" as const,
+                // Time spent is evidence of progress, not proof that written
+                // work has been submitted. Completion remains user-confirmed.
+                progress: {
+                  ...existingProgress,
+                  percentComplete: nextPercent,
+                  lastUpdatedAt: now,
+                },
+                updatedAt: now,
+              };
+            })
+          : prev.assignments;
+
+        return {
+          ...prev,
+          assignments,
+          studySessions: [
+            {
+              ...data,
+              id: generateId(),
+              createdAt: now,
+            },
+            ...prev.studySessions,
+          ],
+        };
+      });
     },
     [commitStudentState],
   );

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { PenLine } from "lucide-react";
 import { Header } from "@/components/header";
 import { useApp } from "@/components/providers/app-provider";
-import { PomodoroTimer } from "@/components/study-tools/pomodoro-timer";
+import { FocusSessionTimer } from "@/components/study-tools/pomodoro-timer";
 import { Card } from "@/components/ui/card";
 import { LoadingScreen } from "@/components/ui/loading";
 import { formatFocusTime } from "@/lib/date";
@@ -27,7 +27,7 @@ export function StudyToolsPageContent() {
           <p className="mt-1 text-sm text-muted-foreground">
             {pomodoro.totalFocusSeconds > 0
               ? `You've focused for ${formatFocusTime(pomodoro.totalFocusSeconds)}.`
-              : "Start a Pomodoro session to begin tracking focus time."}
+              : "Start a focus session to begin tracking study time."}
           </p>
           <div className="mt-4">
             <div className="flex items-center justify-between text-sm">
@@ -44,7 +44,7 @@ export function StudyToolsPageContent() {
         </Card>
 
         <div className="grid gap-6 lg:grid-cols-2">
-          <PomodoroTimer />
+          <FocusSessionTimer />
 
           <Card>
             <h3 className="font-semibold">Quick Links</h3>

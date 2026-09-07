@@ -115,7 +115,7 @@ export function DashboardPageContent() {
         pomodoro.totalFocusSeconds >= 3600
           ? `${(pomodoro.totalFocusSeconds / 3600).toFixed(1)}h`
           : `${Math.floor(pomodoro.totalFocusSeconds / 60)}m`,
-      sub: `${pomodoro.sessionsCompleted} pomodoro sessions`,
+      sub: `${pomodoro.sessionsCompleted} focus sessions`,
       icon: TrendingUp,
     },
     {

@@ -17,9 +17,10 @@ export const DEFAULT_SETTINGS = {
 } as const;
 
 export const DEFAULT_POMODORO = {
-  workDuration: 25 * 60,
-  breakDuration: 5 * 60,
-  timeLeft: 25 * 60,
+  sessionStyle: "focus" as const,
+  workDuration: 0,
+  breakDuration: 0,
+  timeLeft: 0,
   isRunning: false,
   mode: "work" as const,
   sessionsCompleted: 0,

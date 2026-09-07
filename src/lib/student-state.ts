@@ -11,6 +11,14 @@ import type { CalendarFollowUpItem } from "./calendar-followups";
 import { AcademicGoal, AnalyticsInsight, AppSettings, DailyMissionPlan, ReflectionEntry, StudySession, TutorMessage } from "./types";
 import { AcademicNotification, Course, IntegrationConnection } from "./academic-graph";
 
+export type WellbeingCheckIn = {
+  date: string;
+  energyLevel: number;
+  focusScore: number;
+  stressLevel: number;
+  recordedAt: string;
+};
+
 export type StudentState = {
     profile: {
       name: string;
@@ -60,6 +68,8 @@ export type StudentState = {
     currentMission: Mission | null;
 
     missionHistory: Mission[];
+
+    wellbeingHistory: WellbeingCheckIn[];
 
     missionHiddenEventIds: string[];
 

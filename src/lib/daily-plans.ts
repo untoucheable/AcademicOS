@@ -276,7 +276,17 @@ function mapManualBlockToEvent(block: MissionManualBlock): CalendarEvent {
   };
 }
 
-function buildWeekBaselineEvents(plan: DailyMissionPlan | null | undefined, currentTime: string) {
+function addMinutesToClock(clock: string, minutesToAdd: number) {
+  const [hours, minutes] = clock.split(":").map(Number);
+  const totalMinutes = hours * 60 + minutes + minutesToAdd;
+  return `${String(Math.floor(totalMinutes / 60)).padStart(2, "0")}:${String(totalMinutes % 60).padStart(2, "0")}`;
+}
+
+function buildWeekBaselineEvents(
+  plan: DailyMissionPlan | null | undefined,
+  currentTime: string,
+  options?: { saturdayWakeTime?: string },
+) {
   const dateKey = getLocalDateKey(currentTime);
   // A school weekday has a baseline even before the student has opened the
   // day-plan editor. Only today's explicit "No school" choice can remove it.
@@ -309,9 +319,27 @@ function buildWeekBaselineEvents(plan: DailyMissionPlan | null | undefined, curr
       );
     }
   } else if (dayOfWeek === 6) {
-    blocks.push({ id: "saturday-wake", title: "Wake up", type: "personal", start: "10:00", end: "10:30" });
+    const saturdayWakeTime = options?.saturdayWakeTime || "10:00";
+    blocks.push({
+      id: "saturday-sleep-in",
+      title: "Sleep in",
+      type: "personal",
+      start: "05:30",
+      end: saturdayWakeTime,
+    });
+    blocks.push({
+      id: "saturday-wake",
+      title: "Wake up",
+      type: "personal",
+      start: saturdayWakeTime,
+      end: addMinutesToClock(saturdayWakeTime, 30),
+    });
   } else {
-    blocks.push({ id: "sunday-wake", title: "Wake up", type: "personal", start: "07:30", end: "08:00" });
+    blocks.push(
+      { id: "sunday-sleep", title: "Sleep", type: "personal", start: "05:30", end: "08:00" },
+      { id: "sunday-church-prep", title: "Get ready for church", type: "personal", start: "08:00", end: "10:00" },
+      { id: "sunday-church", title: "Church", type: "personal", start: "10:00", end: "13:00" },
+    );
   }
 
   // Sleep is a protected part of the day, not an unlabelled stretch of free time.
@@ -331,8 +359,12 @@ function buildWeekBaselineEvents(plan: DailyMissionPlan | null | undefined, curr
   }) satisfies CalendarEvent);
 }
 
-export function buildDailyPlanEvents(plan: DailyMissionPlan | null | undefined, currentTime: string) {
-  const baselineEvents = buildWeekBaselineEvents(plan, currentTime);
+export function buildDailyPlanEvents(
+  plan: DailyMissionPlan | null | undefined,
+  currentTime: string,
+  options?: { saturdayWakeTime?: string },
+) {
+  const baselineEvents = buildWeekBaselineEvents(plan, currentTime, options);
   const currentDateKey = getLocalDateKey(currentTime);
   const manualBlocks = plan?.date === currentDateKey && Array.isArray(plan.manualBlocks)
     ? plan.manualBlocks.map(mapManualBlockToEvent)

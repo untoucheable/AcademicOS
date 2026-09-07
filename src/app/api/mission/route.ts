@@ -5,7 +5,7 @@ import {
   getRecommendedAssessmentStudyBlockMinutes,
   isAssessmentPrepType,
 } from "@/lib/assignment";
-import { CalendarEvent, CalendarEventType, normalizeCalendarEvents } from "@/lib/calendar";
+import { CalendarEvent, normalizeCalendarEvents } from "@/lib/calendar";
 import { calendarEventSignature } from "@/lib/calendar-signature";
 import { buildAcademicIntelligenceSnapshot } from "@/lib/intelligence";
 import { calculateGradeAverage } from "@/lib/academic-analytics";
@@ -15,21 +15,6 @@ import { StudentState } from "@/lib/student-state";
 import { getState, updateState } from "@/lib/server-state";
 
 import OpenAI from "openai";
-
-type ExtractedCalendarEvent = {
-  title: string;
-  type: CalendarEventType;
-  startTime: string;
-  endTime: string;
-};
-
-type ExtractionResult = {
-  calendarEvents?: ExtractedCalendarEvent[];
-};
-
-type DeletionResult = {
-  removeEvents?: string[];
-};
 
 type MissionInputAssignment = {
   id: string;
@@ -67,22 +52,87 @@ type MissionInputDocument = {
   tags?: string[];
 };
 
+type MissionAiResponse = Mission & {
+  inputCalendarEvents?: Array<{
+    title: string;
+    type: CalendarEvent["type"];
+    startTime: string;
+    endTime: string;
+  }>;
+};
+
 type EnergyMode = "recovery" | "normal" | "high-output";
 
-type AiStage = "deletion" | "extraction" | "mission";
+type AiStage = "mission";
 
 const client = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY!,
 });
 
-const PRIMARY_AI_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
-const FALLBACK_AI_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || "openrouter/free";
+const PRIMARY_AI_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite";
 
 const AI_OUTPUT_TOKEN_LIMITS = {
-  deletion: 1000,
-  extraction: 1000,
-  mission: 3000,
+  mission: 2000,
+} as const;
+
+// This is intentionally the existing Mission shape. The planner is allowed to
+// suggest a schedule, while deterministic code validates and applies it.
+const MISSION_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "id",
+    "createdAt",
+    "currentTime",
+    "energyLevel",
+    "focusScore",
+    "burnoutRisk",
+    "expectedFinishTime",
+    "summary",
+    "schedule",
+  ],
+  properties: {
+    id: { type: "string" },
+    createdAt: { type: "string" },
+    currentTime: { type: "string" },
+    energyLevel: { type: "string", enum: ["low", "medium", "high"] },
+    focusScore: { type: "number" },
+    burnoutRisk: { type: "number" },
+    expectedFinishTime: { type: "string" },
+    summary: { type: "string" },
+    reason: { type: "string" },
+    inputCalendarEvents: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "type", "startTime", "endTime"],
+        properties: {
+          title: { type: "string" },
+          type: { type: "string", enum: ["study", "break", "school", "exercise", "personal"] },
+          startTime: { type: "string" },
+          endTime: { type: "string" },
+        },
+      },
+    },
+    schedule: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "title", "type", "startTime", "endTime", "priority"],
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          type: { type: "string", enum: ["study", "break", "school", "exercise", "personal"] },
+          startTime: { type: "string" },
+          endTime: { type: "string" },
+          priority: { type: "number" },
+        },
+      },
+    },
+  },
 } as const;
 
 function extractFirstCompleteJsonValue(value: string) {
@@ -142,6 +192,40 @@ function parseAiJson<T>(content: string | null | undefined, fallback: T): T {
 
 function normalizeText(value: string) {
   return value.trim().toLowerCase();
+}
+
+function getDeterministicRemovalTitles(input: unknown, state: StudentState) {
+  if (typeof input !== "string") return [];
+
+  const normalizedInput = normalizeText(input);
+  if (!/\b(remove|delete|cancel(?:led|ed)?|clear|get rid of|no longer|not happening|called off)\b/.test(normalizedInput)) {
+    return [];
+  }
+
+  const candidates = [
+    ...(state.currentMission?.schedule || []),
+    ...state.calendar,
+  ].filter((event, index, events) =>
+    events.findIndex((candidate) => candidate.id === event.id) === index,
+  );
+
+  return candidates
+    .filter((event) => {
+      const title = normalizeText(event.title);
+      if (title.length >= 4 && normalizedInput.includes(title)) return true;
+
+      const titleWords = title.match(/[a-z0-9]+/g) || [];
+      const matchingWords = titleWords.filter(
+        (word) => word.length >= 4 && normalizedInput.includes(word),
+      );
+
+      // A single distinctive commitment word is enough for natural phrases
+      // such as "practice cancelled" or "cancel refereeing".
+      return matchingWords.length >= 2 || matchingWords.some((word) =>
+        ["practice", "training", "refereeing", "referee", "church"].includes(word),
+      );
+    })
+    .map((event) => event.title);
 }
 
 function clampScore(value: number, min = 1, max = 10) {
@@ -226,28 +310,13 @@ function isOpenRouterCreditError(err: unknown) {
   return status === 402 || message.includes("more credits") || message.includes("insufficient") || message.includes("max_tokens");
 }
 
-function isRetryableAiProviderError(err: unknown) {
-  const message = getErrorMessage(err).toLowerCase();
-  const status = getErrorStatus(err);
+function isAiProviderError(err: unknown) {
+  return typeof getErrorStatus(err) === "number" || isAiConnectionError(err);
+}
 
-  return (
-    status === 402 ||
-    status === 408 ||
-    status === 409 ||
-    status === 429 ||
-    status === 500 ||
-    status === 502 ||
-    status === 503 ||
-    status === 504 ||
-    message.includes("provider") ||
-    message.includes("temporar") ||
-    message.includes("unavailable") ||
-    message.includes("timed out") ||
-    message.includes("timeout") ||
-    message.includes("max_tokens") ||
-    message.includes("more credits") ||
-    message.includes("insufficient")
-  );
+function isTransientMissionProviderError(err: unknown) {
+  const status = getErrorStatus(err);
+  return status === 429 || (typeof status === "number" && status >= 500 && status <= 599);
 }
 
 function buildAiFallbackSummary(err: unknown) {
@@ -274,6 +343,10 @@ function buildAiFallbackSummary(err: unknown) {
 }
 
 function logAiFailure(stage: AiStage, model: string, err: unknown) {
+  const providerMessage = getErrorMessage(err)
+    .replace(/bearer\s+[^\s]+/gi, "Bearer [redacted]")
+    .slice(0, 600);
+
   console.error("AcademicOS AI request failed", {
     stage,
     model,
@@ -282,47 +355,44 @@ function logAiFailure(stage: AiStage, model: string, err: unknown) {
     type: getErrorType(err),
     requestId: getErrorRequestId(err) || getErrorHeader(err, "x-request-id"),
     provider: getErrorHeader(err, "x-openrouter-provider"),
-    message: getErrorMessage(err),
+    message: providerMessage,
   });
 }
 
-async function createAiCompletion({
-  stage,
-  maxTokens,
-  messages,
-}: {
-  stage: AiStage;
-  maxTokens: number;
-  messages: Parameters<typeof client.chat.completions.create>[0]["messages"];
-}) {
+async function createMissionCompletion(
+  messages: Parameters<typeof client.chat.completions.create>[0]["messages"],
+) {
+  const requestCompletion = () => client.chat.completions.create({
+    model: PRIMARY_AI_MODEL,
+    max_tokens: AI_OUTPUT_TOKEN_LIMITS.mission,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "academic_os_mission",
+        strict: true,
+        schema: MISSION_RESPONSE_SCHEMA,
+      },
+    },
+    messages,
+  });
+
   try {
-    return await client.chat.completions.create({
-      model: PRIMARY_AI_MODEL,
-      max_tokens: maxTokens,
-      response_format: { type: "json_object" },
-      messages,
-    });
-  } catch (primaryError) {
-    logAiFailure(stage, PRIMARY_AI_MODEL, primaryError);
+    return await requestCompletion();
+  } catch (firstError) {
+    logAiFailure("mission", PRIMARY_AI_MODEL, firstError);
 
-    const canRetryWithFreeFallback =
-      FALLBACK_AI_MODEL &&
-      FALLBACK_AI_MODEL !== PRIMARY_AI_MODEL &&
-      isRetryableAiProviderError(primaryError);
-
-    if (!canRetryWithFreeFallback) {
-      throw primaryError;
+    if (!isTransientMissionProviderError(firstError)) {
+      throw firstError;
     }
 
+    // One bounded retry for transient provider failures. The deterministic
+    // planner is the next and final fallback, never another AI model.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
     try {
-      return await client.chat.completions.create({
-        model: FALLBACK_AI_MODEL,
-        max_tokens: maxTokens,
-        messages,
-      });
-    } catch (fallbackError) {
-      logAiFailure(stage, FALLBACK_AI_MODEL, fallbackError);
-      throw fallbackError;
+      return await requestCompletion();
+    } catch (retryError) {
+      logAiFailure("mission", PRIMARY_AI_MODEL, retryError);
+      throw retryError;
     }
   }
 }
@@ -3398,12 +3468,57 @@ function emptyMission(currentTime: string, summary: string): Mission {
   };
 }
 
+function getValidatedInputCalendarEvents(value: MissionAiResponse | null, currentTime: string) {
+  if (!Array.isArray(value?.inputCalendarEvents)) return [];
+
+  return value.inputCalendarEvents
+    .filter((event) =>
+      typeof event?.title === "string" &&
+      ["study", "break", "school", "exercise", "personal"].includes(event.type) &&
+      typeof event.startTime === "string" &&
+      typeof event.endTime === "string" &&
+      Number.isFinite(new Date(event.startTime).getTime()) &&
+      Number.isFinite(new Date(event.endTime).getTime()) &&
+      new Date(event.endTime).getTime() > new Date(event.startTime).getTime(),
+    )
+    .map((event) => ({
+      id: crypto.randomUUID(),
+      title: event.title.trim(),
+      type: event.type,
+      startTime: event.startTime,
+      endTime: event.endTime,
+      priority: 1,
+      createdAt: currentTime,
+      source: "manual" as const,
+      fixed: true,
+    }))
+    .filter((event) => event.title.length > 0);
+}
+
 function isCompleteMissionResponse(value: Mission | null): value is Mission {
-  return Boolean(
-    value &&
-      typeof value.id === "string" &&
-      typeof value.summary === "string" &&
-      Array.isArray(value.schedule),
+  if (!value ||
+    typeof value.id !== "string" ||
+    typeof value.createdAt !== "string" ||
+    typeof value.currentTime !== "string" ||
+    !["low", "medium", "high"].includes(value.energyLevel) ||
+    !Number.isFinite(value.focusScore) ||
+    !Number.isFinite(value.burnoutRisk) ||
+    typeof value.expectedFinishTime !== "string" ||
+    typeof value.summary !== "string" ||
+    !Array.isArray(value.schedule)) {
+    return false;
+  }
+
+  return value.schedule.every((event) =>
+    typeof event.id === "string" &&
+    typeof event.title === "string" &&
+    ["study", "break", "school", "exercise", "personal"].includes(event.type) &&
+    typeof event.startTime === "string" &&
+    typeof event.endTime === "string" &&
+    Number.isFinite(event.priority) &&
+    Number.isFinite(new Date(event.startTime).getTime()) &&
+    Number.isFinite(new Date(event.endTime).getTime()) &&
+    new Date(event.endTime).getTime() > new Date(event.startTime).getTime(),
   );
 }
 
@@ -3553,8 +3668,9 @@ export async function POST(req: Request) {
       );
     }
 
-    const { planningDayKey, planningStart, planningEnd, planningOffsetMinutes, bedtimePolicy, deadlineEmergencyPolicy, fixedEvents: fixedCalendar } =
-      buildFixedMissionScheduleForDay(state, currentTime);
+    const fixedMissionSchedule = buildFixedMissionScheduleForDay(state, currentTime);
+    const { planningDayKey, planningStart, planningEnd, planningOffsetMinutes, bedtimePolicy, deadlineEmergencyPolicy } = fixedMissionSchedule;
+    let fixedCalendar = fixedMissionSchedule.fixedEvents;
 
     if (requestMode === "quick-update" && state.currentMission) {
       const suppressedAssignmentIds = getActiveMissionSuppressedAssignmentIds(state, currentTime);
@@ -3800,49 +3916,11 @@ export async function POST(req: Request) {
       return Response.json(finalMission);
     }
 
-    let removals: string[] = [];
-
-    if (requestMode !== "quick-update") {
-      const deletion = await createAiCompletion({
-        stage: "deletion",
-        maxTokens: AI_OUTPUT_TOKEN_LIMITS.deletion,
-        messages: [
-          {
-            role: "system",
-            content: `
-You detect whether the user is asking to remove calendar events.
-
-Return ONLY valid JSON.
-
-If the user asks to remove, delete, cancel, clear, or get rid of an event, return:
-{
-  "removeEvents": ["event title or keyword"]
-}
-
-If the user is not asking to remove an event, return:
-{
-  "removeEvents": []
-}
-
-Rules:
-- Extract the shortest useful event title or keyword.
-- "remove soccer" returns ["soccer"].
-- "get rid of biology class" returns ["biology class"].
-- Do not include study recommendations here.
-            `
-          },
-          {
-            role: "user",
-            content: input || "",
-          },
-        ],
-      });
-      const deletionResult = parseAiJson<DeletionResult>(
-        deletion.choices[0].message.content,
-        {}
-      );
-      removals = deletionResult.removeEvents || [];
-    }
+    // Clear cancellation/removal requests are resolved locally, so a simple
+    // request never pays for an AI classification call before planning.
+    const removals = requestMode === "quick-update"
+      ? []
+      : getDeterministicRemovalTitles(input, state);
 
     if (removals.length) {
       let removedCount = 0;
@@ -3880,103 +3958,6 @@ Rules:
               : "I could not find a matching item to remove from the mission."
           ),
       );
-    }
-
-    const extraction = await createAiCompletion({
-      stage: "extraction",
-      maxTokens: AI_OUTPUT_TOKEN_LIMITS.extraction,
-      messages: [
-        {
-          role: "system",
-          content: `
-    You extract calendar events from student messages.
-
-Return ONLY valid JSON.
-
-Rules:
-- Detect any event the user mentions.
-- If the user gives a time, that time is FIXED.
-- Never guess a different time.
-- Convert times into ISO format using the provided current date.
-- Preserve the user's local timezone offset in returned ISO strings.
-- If the user says "6pm", return 18:00 in the user's local timezone, not 18:00 UTC.
-- "6pm" means 18:00.
-- "7:30pm" means 19:30.
-- If no end time is provided, assume 1 hour duration.
-
-Current date/time:
-${currentTime}
-
-User timezone:
-${timeZone || "local timezone"}
-
-Return exactly:
-
-{
-  "calendarEvents": [
-    {
-      "title": "string",
-      "type": "personal | school | study | break",
-      "startTime": "ISO string",
-      "endTime": "ISO string"
-    }
-  ]
-}
-
-If no event exists:
-
-{
-  "calendarEvents": []
-}
-    `
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            input,
-            currentTime,
-            timeZone
-          })
-        }
-      ]
-    });
-    const extracted = parseAiJson<ExtractionResult>(
-      extraction.choices[0].message.content,
-      {}
-    );
-    const extractedEvents = extracted.calendarEvents || [];
-
-    if (extractedEvents.length) {
-      await updateState((state) => ({
-        ...state,
-    
-        calendar: [
-          // remove old manual events with same title
-          ...state.calendar.filter(
-            event =>
-              !extractedEvents.some(
-                (newEvent) =>
-                  event.title.toLowerCase() === newEvent.title.toLowerCase() &&
-                  event.source === "manual"
-              )
-          ),
-    
-          // add new extracted events
-          ...extractedEvents.map((e) => ({
-            id: crypto.randomUUID(),
-            title: e.title,
-            type: e.type,
-            startTime: e.startTime,
-            endTime: e.endTime,
-            priority: 1,
-            createdAt: new Date().toISOString(),
-            source: "manual" as const,
-            fixed: true,
-          })),
-        ],
-      }));
-    
-      state = await getState();
     }
 
     state = await updateState((currentState) => ({
@@ -4024,10 +4005,8 @@ If no event exists:
       tags: document.tags,
     }));
 
-    const completion = await createAiCompletion({
-      stage: "mission",
-      maxTokens: AI_OUTPUT_TOKEN_LIMITS.mission,
-      messages: [
+    const completion = await createMissionCompletion(
+      [
         {
           role: "system",
           content: `
@@ -4093,12 +4072,13 @@ You MUST follow these rules:
   "burnoutRisk": 1,
   "expectedFinishTime": "string",
   "summary": "string",
+  "inputCalendarEvents": [],
 
   "schedule": [
     {
       "id": "string",
       "title": "string",
-      "type": "study | break | school | personal",
+      "type": "study | break | school | exercise | personal",
       "startTime": "string (ISO format)",
       "endTime": "string (ISO format)",
       "priority": 1
@@ -4115,6 +4095,8 @@ You MUST follow these rules:
 - Always detect explicit times (e.g. 19:30, 7pm, tomorrow at 3)
 - Treat them as fixed calendar events
 - Do not optimize over them
+- Return each new, explicitly timed event in inputCalendarEvents as well as in schedule.
+- inputCalendarEvents must be [] when the user did not state a new event with an explicit time.
 15. If the user mentions a specific time for an event, you MUST:
 1. Insert it exactly at that time
 2. NEVER move it
@@ -4264,12 +4246,31 @@ Every study block must name the exact assignment, course, document, or subject b
           })
         },
       ],
-    });
+    );
 
     const text = completion.choices[0].message.content;
 
-    const parsedMission = parseAiJson<Mission | null>(text, null);
-    const mission = isCompleteMissionResponse(parsedMission)
+    const parsedMission = parseAiJson<MissionAiResponse | null>(text, null);
+    const hasValidMissionResponse = isCompleteMissionResponse(parsedMission);
+    const inputCalendarEvents = hasValidMissionResponse
+      ? getValidatedInputCalendarEvents(parsedMission, currentTime)
+      : [];
+
+    if (inputCalendarEvents.length) {
+      const incomingSignatures = new Set(inputCalendarEvents.map(calendarEventSignature));
+      state = await updateState((currentState) => ({
+        ...currentState,
+        calendar: normalizeCalendarEvents([
+          ...currentState.calendar.filter(
+            (event) => !incomingSignatures.has(calendarEventSignature(event)),
+          ),
+          ...inputCalendarEvents,
+        ]),
+      }));
+      fixedCalendar = buildFixedMissionScheduleForDay(state, currentTime).fixedEvents;
+    }
+
+    const mission = hasValidMissionResponse
       ? parsedMission
       : buildOfflineMission(currentTime, state);
 
@@ -4407,7 +4408,7 @@ Every study block must name the exact assignment, course, document, or subject b
 
     return Response.json(missionWithReason);
   } catch (err: unknown) {
-    if (isRetryableAiProviderError(err) || isOpenRouterCreditError(err)) {
+    if (isAiProviderError(err) || isOpenRouterCreditError(err)) {
       const mission = sortMission(
         buildAiFallbackMission(
           fallbackCurrentTime,

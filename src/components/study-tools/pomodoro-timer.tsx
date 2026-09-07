@@ -14,6 +14,11 @@ function formatTimer(seconds: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+function getElapsedSecondsSince(startedAt: string | null, now = Date.now()) {
+  if (!startedAt) return 0;
+  return Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
+}
+
 export function FocusSessionTimer() {
   const { addStudySession, assignments, currentMission, pomodoro, setPomodoro } = useApp();
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -54,23 +59,35 @@ export function FocusSessionTimer() {
     setPomodoro((prev) => ({ ...prev, sessionStyle: "focus", timeLeft: 0, isRunning: false, startedAt: null, mode: "work" }));
   }, [pomodoro.sessionStyle, setPomodoro]);
 
-  // Count time passed while the app was closed, without forcing a session to end.
-  useEffect(() => {
-    if (pomodoro.sessionStyle !== "focus" || !pomodoro.isRunning || !pomodoro.startedAt) return;
-    const elapsed = Math.max(0, Math.floor((Date.now() - new Date(pomodoro.startedAt).getTime()) / 1000));
-    if (!elapsed) return;
-    setPomodoro((prev) => ({ ...prev, timeLeft: prev.timeLeft + elapsed, startedAt: new Date().toISOString() }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   useEffect(() => {
     if (!pomodoro.isRunning || pomodoro.sessionStyle !== "focus") {
       if (intervalRef.current) clearInterval(intervalRef.current);
       return;
     }
-    intervalRef.current = setInterval(() => setPomodoro((prev) => ({ ...prev, timeLeft: prev.timeLeft + 1 })), 1000);
+
+    // Browser tabs are deliberately throttled in the background. Checkpoint
+    // against a real timestamp rather than trusting a one-second interval, so
+    // navigation and visibility changes neither lose time nor double-count it.
+    const syncElapsedTime = () => {
+      const checkpoint = new Date();
+      setPomodoro((prev) => {
+        if (!prev.isRunning || !prev.startedAt) return prev;
+        const elapsed = getElapsedSecondsSince(prev.startedAt, checkpoint.getTime());
+        return elapsed > 0
+          ? { ...prev, timeLeft: prev.timeLeft + elapsed, startedAt: checkpoint.toISOString() }
+          : prev;
+      });
+    };
+    const handleVisibilityChange = () => {
+      if (!document.hidden) syncElapsedTime();
+    };
+
+    syncElapsedTime();
+    intervalRef.current = setInterval(syncElapsedTime, 1000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [pomodoro.isRunning, pomodoro.sessionStyle, setPomodoro]);
 
@@ -79,7 +96,13 @@ export function FocusSessionTimer() {
   }
 
   function pause() {
-    setPomodoro((prev) => ({ ...prev, isRunning: false, startedAt: null }));
+    const pausedAt = new Date();
+    setPomodoro((prev) => ({
+      ...prev,
+      timeLeft: prev.timeLeft + getElapsedSecondsSince(prev.startedAt, pausedAt.getTime()),
+      isRunning: false,
+      startedAt: null,
+    }));
   }
 
   function discard() {
@@ -87,7 +110,8 @@ export function FocusSessionTimer() {
   }
 
   function finish() {
-    const completedSeconds = pomodoro.timeLeft;
+    const finishedAt = new Date();
+    const completedSeconds = pomodoro.timeLeft + getElapsedSecondsSince(pomodoro.startedAt, finishedAt.getTime());
     if (completedSeconds <= 0) return;
     if (selectedTarget?.assignment) {
       addStudySession({
@@ -105,7 +129,7 @@ export function FocusSessionTimer() {
       startedAt: null,
       timeLeft: 0,
       sessionsCompleted: prev.sessionsCompleted + 1,
-      totalFocusSeconds: prev.totalFocusSeconds + completedSeconds,
+      totalFocusSeconds: prev.totalFocusSeconds + prev.timeLeft + getElapsedSecondsSince(prev.startedAt, finishedAt.getTime()),
     }));
   }
 

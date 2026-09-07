@@ -199,6 +199,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
   const loadedRef = useRef(false);
   const missionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const missionRefreshInFlightRef = useRef(false);
+  const lastMissionRefreshAtRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -235,6 +237,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const refreshMissionState = useCallback(async (reason = "Student data changed") => {
     if (!loadedRef.current) return;
+    if (missionRefreshInFlightRef.current) return;
+    if (Date.now() - lastMissionRefreshAtRef.current < 8_000) return;
+
+    missionRefreshInFlightRef.current = true;
+    lastMissionRefreshAtRef.current = Date.now();
 
     try {
       await fetch("/api/mission", {
@@ -252,6 +259,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       await refreshStudentState();
     } catch {
       // Best effort background rebuild.
+    } finally {
+      missionRefreshInFlightRef.current = false;
     }
   }, [refreshStudentState]);
 
@@ -264,7 +273,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     missionRefreshTimerRef.current = setTimeout(() => {
       void refreshMissionState(reason);
-    }, 600);
+    }, 2_500);
   }, [refreshMissionState]);
 
   const commitStudentState = useCallback((updater: (state: StudentState) => StudentState) => {
@@ -682,9 +691,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       await refreshStudentState();
-      queueMissionRefresh("Mission health changed");
     },
-    [queueMissionRefresh, refreshStudentState],
+    [refreshStudentState],
   );
 
   const setDailyMissionPlan = useCallback(
@@ -703,10 +711,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (loadedRef.current && nextState) {
         const persisted = await persistStudentState(nextState);
         setStudentState(persisted);
-        queueMissionRefresh("Student data changed");
       }
     },
-    [queueMissionRefresh],
+    [],
   );
 
   const normalizedProfile = useMemo(() => normalizeProfile(studentState.profile), [studentState.profile]);

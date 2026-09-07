@@ -13,6 +13,7 @@ export type AssignmentFormData = {
   course: string;
   assessmentType: AssignmentAssessmentType;
   dueDate: string;
+  dueTime: string;
   priority: AssignmentPriority;
   estimatedMinutes: number;
   progressPercent: number;
@@ -38,6 +39,7 @@ export function AssignmentForm({
     course: initial?.course ?? "",
     assessmentType: initial?.assessmentType ?? "assignment",
     dueDate: initial?.dueDate ?? toDateKey(new Date()),
+    dueTime: initial?.dueTime ?? "",
     priority: initial?.priority ?? "medium",
     estimatedMinutes: initial?.estimatedMinutes ?? 45,
     progressPercent: initial?.progress?.percentComplete ?? 0,
@@ -145,6 +147,15 @@ export function AssignmentForm({
           value={form.dueDate}
           onChange={(e) => setForm((f) => ({ ...f, dueDate: e.target.value }))}
         />
+        <Input
+          id="dueTime"
+          label="Due Time (optional)"
+          type="time"
+          value={form.dueTime}
+          onChange={(e) => setForm((f) => ({ ...f, dueTime: e.target.value }))}
+        />
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
           <label htmlFor="priority" className="block text-sm font-medium">
             Priority

@@ -40,6 +40,8 @@ export type Assignment = {
   notes?: string;
 
   dueDate: string; // ISO date
+  // Optional local deadline time (HH:mm). An omitted value means 11:59 PM.
+  dueTime?: string;
 
   priority: AssignmentPriority;
 
@@ -64,6 +66,8 @@ export type AssessmentSliceFramework = {
   remainingMinutes: number;
   daysUntilDue: number;
   availableStudyDays: number;
+  bufferedStudyDays: number;
+  safeDailyPaceMinutes: number;
   recommendedTodayMinutes: number;
   preferredBlockMinutes: number;
   minimumBlockMinutes: number;
@@ -75,6 +79,8 @@ export type TrackedWorkSliceFramework = {
   remainingMinutes: number;
   daysUntilDue: number;
   availableWorkDays: number;
+  bufferedWorkDays: number;
+  safeDailyPaceMinutes: number;
   recommendedTodayMinutes: number;
   preferredBlockMinutes: number;
   minimumBlockMinutes: number;
@@ -89,6 +95,20 @@ function clamp(value: number, min: number, max: number) {
 
 function roundToNearestFive(value: number) {
   return Math.max(0, Math.round(value / 5) * 5);
+}
+
+function roundUpToFive(value: number) {
+  return Math.max(0, Math.ceil(value / 5) * 5);
+}
+
+function getBufferedPace(remainingMinutes: number, availableDays: number) {
+  // Plan completion across only 75% of the usable days. The final quarter is
+  // deliberate slack for fixed commitments, low-energy days, and surprises.
+  const bufferedDays = Math.max(1, Math.ceil(availableDays * 0.75));
+  return {
+    bufferedDays,
+    safeDailyPaceMinutes: roundUpToFive(remainingMinutes / bufferedDays),
+  };
 }
 
 function toUtcDateValue(dateKey: string) {
@@ -157,6 +177,8 @@ export function buildAssessmentSliceFramework(
       remainingMinutes: 0,
       daysUntilDue,
       availableStudyDays: 1,
+      bufferedStudyDays: 1,
+      safeDailyPaceMinutes: 0,
       recommendedTodayMinutes: 0,
       preferredBlockMinutes: 0,
       minimumBlockMinutes: 0,
@@ -165,7 +187,11 @@ export function buildAssessmentSliceFramework(
     };
   }
 
-  const availableStudyDays = Math.max(1, Math.min(14, daysUntilDue + 1));
+  const availableStudyDays = Math.max(1, daysUntilDue + 1);
+  const { bufferedDays: bufferedStudyDays, safeDailyPaceMinutes } = getBufferedPace(
+    remainingMinutes,
+    availableStudyDays,
+  );
   // Prefer one meaningful active-practice session over several tiny fragments.
   let minimumBlockMinutes = remainingMinutes < 45 ? 20 : 45;
   let maximumBlockMinutes = 75;
@@ -204,7 +230,6 @@ export function buildAssessmentSliceFramework(
     preferredBlockMinutes = Math.max(minimumBlockMinutes, preferredBlockMinutes - 5);
   }
 
-  const baseTodayMinutes = roundToNearestFive(remainingMinutes / availableStudyDays);
   const urgencyFloor = daysUntilDue <= 0
     ? Math.min(remainingMinutes, 90)
     : daysUntilDue === 1
@@ -214,7 +239,7 @@ export function buildAssessmentSliceFramework(
         : Math.min(remainingMinutes, 25);
   const dailyCap = Math.min(remainingMinutes, maximumBlockMinutes * maxBlocksPerDay);
   let recommendedTodayMinutes = roundToNearestFive(
-    Math.max(baseTodayMinutes, urgencyFloor, preferredBlockMinutes),
+    Math.max(safeDailyPaceMinutes, urgencyFloor, preferredBlockMinutes),
   );
 
   recommendedTodayMinutes = clamp(
@@ -247,6 +272,8 @@ export function buildAssessmentSliceFramework(
     remainingMinutes,
     daysUntilDue,
     availableStudyDays,
+    bufferedStudyDays,
+    safeDailyPaceMinutes,
     recommendedTodayMinutes,
     preferredBlockMinutes,
     minimumBlockMinutes,
@@ -268,6 +295,8 @@ export function buildTrackedWorkSliceFramework(
       remainingMinutes: 0,
       daysUntilDue,
       availableWorkDays: 1,
+      bufferedWorkDays: 1,
+      safeDailyPaceMinutes: 0,
       recommendedTodayMinutes: 0,
       preferredBlockMinutes: 0,
       minimumBlockMinutes: 0,
@@ -277,7 +306,11 @@ export function buildTrackedWorkSliceFramework(
     };
   }
 
-  const availableWorkDays = Math.max(1, Math.min(14, daysUntilDue + 1));
+  const availableWorkDays = Math.max(1, daysUntilDue + 1);
+  const { bufferedDays: bufferedWorkDays, safeDailyPaceMinutes } = getBufferedPace(
+    remainingMinutes,
+    availableWorkDays,
+  );
 
   if (shouldFinishToday) {
     const minimumBlockMinutes = 25;
@@ -293,6 +326,8 @@ export function buildTrackedWorkSliceFramework(
       remainingMinutes,
       daysUntilDue,
       availableWorkDays,
+      bufferedWorkDays,
+      safeDailyPaceMinutes,
       recommendedTodayMinutes: remainingMinutes,
       preferredBlockMinutes,
       minimumBlockMinutes,
@@ -334,14 +369,13 @@ export function buildTrackedWorkSliceFramework(
     preferredBlockMinutes = Math.max(minimumBlockMinutes, preferredBlockMinutes - 5);
   }
 
-  const baseTodayMinutes = roundToNearestFive(remainingMinutes / availableWorkDays);
   const urgencyFloor = daysUntilDue <= 3
     ? Math.min(remainingMinutes, 45)
     : daysUntilDue <= 5
       ? Math.min(remainingMinutes, 35)
       : Math.min(remainingMinutes, 25);
   let recommendedTodayMinutes = roundToNearestFive(
-    Math.max(baseTodayMinutes, urgencyFloor, preferredBlockMinutes),
+    Math.max(safeDailyPaceMinutes, urgencyFloor, preferredBlockMinutes),
   );
   const dailyCap = Math.min(remainingMinutes, maximumBlockMinutes * maxBlocksPerDay);
   recommendedTodayMinutes = clamp(
@@ -371,6 +405,8 @@ export function buildTrackedWorkSliceFramework(
     remainingMinutes,
     daysUntilDue,
     availableWorkDays,
+    bufferedWorkDays,
+    safeDailyPaceMinutes,
     recommendedTodayMinutes,
     preferredBlockMinutes,
     minimumBlockMinutes,

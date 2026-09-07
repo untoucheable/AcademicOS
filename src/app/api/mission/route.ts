@@ -23,6 +23,7 @@ type MissionInputAssignment = {
   subject?: string;
   assessmentType?: "assignment" | "homework" | "test" | "quiz" | "project";
   dueDate: string;
+  dueTime?: string;
   priority: string;
   estimatedMinutes?: number;
   progressPercent?: number;
@@ -31,7 +32,11 @@ type MissionInputAssignment = {
   daysUntilDue?: number;
   availableStudyDays?: number;
   availableWorkDays?: number;
+  bufferedStudyDays?: number;
+  bufferedWorkDays?: number;
+  safeDailyPaceMinutes?: number;
   recommendedTodayMinutes?: number;
+  recoveryTodayMinutes?: number;
   suggestedStudyBlockMinutes?: number;
   preferredWorkBlockMinutes?: number;
   recommendedBlockCount?: number;
@@ -65,15 +70,23 @@ type EnergyMode = "recovery" | "normal" | "high-output";
 
 type AiStage = "mission";
 
+type MissionCompletionResult = {
+  choices: Array<{
+    message: { content: string | null };
+  }>;
+};
+
 const client = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY!,
 });
 
-const PRIMARY_AI_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite";
+// Free routing is the default. An explicitly configured OPENROUTER_MODEL can
+// still select another model, but Mission never falls through to a paid model.
+const PRIMARY_AI_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 
 const AI_OUTPUT_TOKEN_LIMITS = {
-  mission: 2000,
+  mission: 1000,
 } as const;
 
 // This is intentionally the existing Mission shape. The planner is allowed to
@@ -314,9 +327,16 @@ function isAiProviderError(err: unknown) {
   return typeof getErrorStatus(err) === "number" || isAiConnectionError(err);
 }
 
+function isDailyFreeModelQuotaError(err: unknown) {
+  return getErrorStatus(err) === 429 && getErrorMessage(err).toLowerCase().includes("free-models-per-day");
+}
+
 function isTransientMissionProviderError(err: unknown) {
   const status = getErrorStatus(err);
-  return status === 429 || (typeof status === "number" && status >= 500 && status <= 599);
+  return !isDailyFreeModelQuotaError(err) && (
+    status === 429 ||
+    (typeof status === "number" && status >= 500 && status <= 599)
+  );
 }
 
 function buildAiFallbackSummary(err: unknown) {
@@ -328,6 +348,10 @@ function buildAiFallbackSummary(err: unknown) {
   }
 
   if (status === 429) {
+    if (isDailyFreeModelQuotaError(err)) {
+      return "AcademicOS is temporarily using a fallback mission because the OpenRouter free-model daily quota has been reached. Your confirmed calendar items and assignments are still available.";
+    }
+
     return "AcademicOS is temporarily using a fallback mission because the AI provider rate-limited the planning request. Your confirmed calendar items and assignments are still available.";
   }
 
@@ -362,19 +386,24 @@ function logAiFailure(stage: AiStage, model: string, err: unknown) {
 async function createMissionCompletion(
   messages: Parameters<typeof client.chat.completions.create>[0]["messages"],
 ) {
-  const requestCompletion = () => client.chat.completions.create({
-    model: PRIMARY_AI_MODEL,
-    max_tokens: AI_OUTPUT_TOKEN_LIMITS.mission,
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "academic_os_mission",
-        strict: true,
-        schema: MISSION_RESPONSE_SCHEMA,
+  const requestCompletion = (): Promise<MissionCompletionResult> => client.chat.completions.create(
+    {
+      model: PRIMARY_AI_MODEL,
+      max_tokens: AI_OUTPUT_TOKEN_LIMITS.mission,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "academic_os_mission",
+          strict: true,
+          schema: MISSION_RESPONSE_SCHEMA,
+        },
       },
-    },
-    messages,
-  });
+      // OpenRouter's provider routing extension is not declared by the
+      // OpenAI SDK, but is sent server-side to keep the schema contract.
+      provider: { require_parameters: true },
+      messages,
+    } as unknown as Parameters<typeof client.chat.completions.create>[0],
+  ) as unknown as Promise<MissionCompletionResult>;
 
   try {
     return await requestCompletion();
@@ -449,7 +478,7 @@ function buildDeadlineEmergencySummary(
     return `Deadline emergency mode scheduled all remaining required work for ${titles} around your confirmed fixed events.`;
   }
 
-  return `Deadline emergency mode scheduled every available non-fixed minute for ${titles}. ${shortfallMinutes} minutes still cannot fit before 11:59 PM because of confirmed fixed events; that remaining work is automatically the first academic priority in the next day's available time.`;
+  return `Deadline emergency mode scheduled every available non-fixed minute for ${titles}. ${shortfallMinutes} minutes still cannot fit before 11:59 PM because of confirmed fixed events; AcademicOS will recalculate the remaining pace across future usable days, with immediate catch-up priority only when the deadline is within two days.`;
 }
 
 function buildFixedMissionScheduleForDay(state: StudentState, currentTime: string) {
@@ -646,7 +675,9 @@ function deriveBurnoutRiskFromState(
 function buildOfflineMission(currentTime: string, state: StudentState): Mission {
   const { planningStart, planningEnd, fixedEvents, planningDayKey, planningOffsetMinutes, bedtimePolicy, deadlineEmergencyPolicy } = buildFixedMissionScheduleForDay(state, currentTime);
   const manualMentalState = getAuthoritativeMentalState(state, currentTime);
-  const assignmentLimit = manualMentalState.energyLevel === "high" ? 5 : manualMentalState.energyLevel === "low" ? 1 : 3;
+  // The deterministic planner must see every real assignment. Capacity and
+  // priority decide what fits today; an arbitrary list cap must not make work
+  // disappear merely because several items exist.
   const missionAssignments = state.assignments
     .filter((assignment) => !assignment.completed)
     .filter((assignment) => !isPlaceholderAssignment({
@@ -662,14 +693,14 @@ function buildOfflineMission(currentTime: string, state: StudentState): Mission 
       subject: assignment.subject,
       assessmentType: assignment.assessmentType,
       dueDate: assignment.dueDate,
+      dueTime: assignment.dueTime,
       priority: assignment.priority,
       estimatedMinutes: assignment.estimatedMinutes,
       progressPercent: assignment.progress?.percentComplete,
       studyMinutesCompleted: assignment.progress?.studyMinutesCompleted,
       notes: assignment.notes,
     }, currentTime, state))
-    .sort((a, b) => scoreAssignmentForToday(b, currentTime) - scoreAssignmentForToday(a, currentTime))
-    .slice(0, assignmentLimit);
+    .sort((a, b) => scoreAssignmentForToday(b, currentTime) - scoreAssignmentForToday(a, currentTime));
   const seedEvents = missionAssignments.map((assignment) =>
     buildStudyEvent(
       assignment,
@@ -856,8 +887,9 @@ function getMissionAssignmentTargetMinutes(
 
   return Math.max(
     25,
-    assignment.preferredWorkBlockMinutes ||
-      assignment.recommendedTodayMinutes ||
+    assignment.recommendedTodayMinutes ||
+      assignment.safeDailyPaceMinutes ||
+      assignment.preferredWorkBlockMinutes ||
       Math.min(assignment.remainingMinutes || assignment.estimatedMinutes || 45, 45),
   );
 }
@@ -867,6 +899,44 @@ function getEventDurationMinutes(event: CalendarEvent) {
     15,
     Math.round((new Date(event.endTime).getTime() - new Date(event.startTime).getTime()) / 60000) || 45,
   );
+}
+
+function getRequiredStudyBreakMinutes(studyMinutes: number) {
+  // A break is needed only when study continues after a completed hour. A
+  // 60-minute session can end without an artificial trailing break, while a
+  // 75-minute session needs 60 minutes of work, a five-minute break, then 15
+  // more minutes of work.
+  return Math.max(0, Math.floor((Math.max(0, studyMinutes) - 1) / 60) * 5);
+}
+
+function getStudyCalendarFootprintMinutes(studyMinutes: number) {
+  return studyMinutes + getRequiredStudyBreakMinutes(studyMinutes);
+}
+
+function getStudyMinutesThatFitCalendarWindow(
+  desiredStudyMinutes: number,
+  availableCalendarMinutes: number,
+) {
+  const maximum = Math.max(0, Math.min(desiredStudyMinutes, availableCalendarMinutes));
+
+  for (let studyMinutes = maximum; studyMinutes >= 1; studyMinutes -= 1) {
+    if (getStudyCalendarFootprintMinutes(studyMinutes) <= availableCalendarMinutes) {
+      return studyMinutes;
+    }
+  }
+
+  return 0;
+}
+
+function getMinimumStudyMinutesForSchedule(
+  assignment: MissionInputAssignment | null,
+  deadlineEmergency: boolean,
+) {
+  if (deadlineEmergency && assignment?.shouldFinishToday) return 1;
+  if (assignment?.planningStyle === "assessment-prep") {
+    return Math.max(15, assignment.minimumStudyBlockMinutes || 20);
+  }
+  return Math.max(20, assignment?.minimumStudyBlockMinutes || 25);
 }
 
 function roundToNearestFive(minutes: number) {
@@ -1132,7 +1202,22 @@ function addDaysToDateKey(dateKey: string, days: number, offsetMinutes: number) 
   );
 }
 
-function getAssignmentDaysUntilDue(assignment: Pick<MissionInputAssignment, "dueDate">, currentTime: string) {
+function getAssignmentDeadline(assignment: Pick<MissionInputAssignment, "dueDate" | "dueTime">, currentTime: string) {
+  const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(assignment.dueTime || "")
+    ? assignment.dueTime as string
+    : "23:59";
+  const offset = currentTime.match(/([+-]\d{2}:\d{2}|Z)$/)?.[1] || "Z";
+  return new Date(`${assignment.dueDate}T${time}:00${offset}`);
+}
+
+function getAssignmentMinutesUntilDeadline(
+  assignment: Pick<MissionInputAssignment, "dueDate" | "dueTime">,
+  currentTime: string,
+) {
+  return Math.floor((getAssignmentDeadline(assignment, currentTime).getTime() - new Date(currentTime).getTime()) / 60000);
+}
+
+function getAssignmentDaysUntilDue(assignment: Pick<MissionInputAssignment, "dueDate" | "dueTime">, currentTime: string) {
   const currentDateKey = currentTime.slice(0, 10);
   const currentUtc = Date.UTC(...currentDateKey.split("-").map((part, index) => index === 1 ? Number(part) - 1 : Number(part)) as [number, number, number]);
   const dueUtc = Date.UTC(...assignment.dueDate.split("-").map((part, index) => index === 1 ? Number(part) - 1 : Number(part)) as [number, number, number]);
@@ -1362,6 +1447,33 @@ function getDeadlineBedtimePolicy(state: StudentState, currentTime: string): Dea
   };
 }
 
+function getPreviousDayMissedMissionMinutes(
+  state: StudentState,
+  assignmentId: string,
+  currentTime: string,
+) {
+  const offsetMinutes = parsePlanningOffsetMinutes(currentTime);
+  const previousDayKey = addDaysToDateKey(currentTime.slice(0, 10), -1, offsetMinutes);
+  const previousMission = [
+    state.currentMission,
+    ...[...state.missionHistory].reverse(),
+  ].find((mission): mission is Mission => Boolean(mission && mission.currentTime.slice(0, 10) === previousDayKey));
+
+  if (!previousMission) return 0;
+
+  const plannedMinutes = previousMission.schedule
+    .filter((event) => event.type === "study" && event.relatedAssignmentId === assignmentId)
+    .reduce((total, event) => total + getEventDurationMinutes(event), 0);
+  if (!plannedMinutes) return 0;
+
+  const loggedMinutes = state.studySessions
+    .filter((session) => session.relatedAssignmentId === assignmentId)
+    .filter((session) => session.createdAt.slice(0, 10) === previousDayKey)
+    .reduce((total, session) => total + Math.max(0, session.durationMinutes || 0), 0);
+
+  return Math.max(0, plannedMinutes - loggedMinutes);
+}
+
 function getLookaheadAdjustment(
   assignment: MissionInputAssignment,
   state: StudentState,
@@ -1375,17 +1487,36 @@ function getLookaheadAdjustment(
       extraTodayMinutes: 0,
       forceFinishToday: daysUntilDue <= 0,
       planningPressureScore: daysUntilDue <= 0 ? 80 : 0,
+      availableWorkDays: 1,
+      bufferedWorkDays: 1,
+      safeDailyPaceMinutes: remainingMinutes,
+      recoveryTodayMinutes: 0,
     };
   }
 
   const offsetMinutes = parsePlanningOffsetMinutes(currentTime);
   const todayKey = currentTime.slice(0, 10);
   let futureAvailableMinutes = 0;
+  const usableDayCapacities: number[] = [];
+  const todayCapacity = estimateAvailableMinutesForDate(state, todayKey, offsetMinutes, {
+    currentTime,
+  });
+  if (todayCapacity >= 20) usableDayCapacities.push(todayCapacity);
+  let bufferedFutureAvailableMinutes = 0;
 
-  for (let dayOffset = 1; dayOffset <= Math.min(daysUntilDue, 13); dayOffset += 1) {
+  for (let dayOffset = 1; dayOffset <= daysUntilDue; dayOffset += 1) {
     const dateKey = addDaysToDateKey(todayKey, dayOffset, offsetMinutes);
-    futureAvailableMinutes += estimateAvailableMinutesForDate(state, dateKey, offsetMinutes);
+    const dayCapacity = estimateAvailableMinutesForDate(state, dateKey, offsetMinutes);
+    futureAvailableMinutes += dayCapacity;
+    if (dayCapacity >= 20) usableDayCapacities.push(dayCapacity);
   }
+
+  const availableWorkDays = Math.max(1, usableDayCapacities.length);
+  const bufferedWorkDays = Math.max(1, Math.ceil(availableWorkDays * 0.75));
+  const safeDailyPaceMinutes = Math.ceil((remainingMinutes / bufferedWorkDays) / 5) * 5;
+  bufferedFutureAvailableMinutes = usableDayCapacities
+    .slice(1, bufferedWorkDays)
+    .reduce((total, capacity) => total + capacity, 0);
 
   // Capacity belongs to every real task due by this date, not just the
   // assignment currently being scored. This avoids promising the same future
@@ -1400,11 +1531,27 @@ function getLookaheadAdjustment(
     .reduce((total, candidate) => total + getTrackedWorkRemainingMinutes(candidate), 0);
   const workDueByDeadline = remainingMinutes + competingMinutes;
   const shortageMinutes = Math.max(0, workDueByDeadline - futureAvailableMinutes);
+  const bufferedCapacityShortfall = Math.max(
+    0,
+    remainingMinutes - safeDailyPaceMinutes - bufferedFutureAvailableMinutes,
+  );
   const forceFinishToday = daysUntilDue <= 2 && futureAvailableMinutes < Math.max(60, Math.round(workDueByDeadline * 0.75));
+  // Missed work is not copied wholesale into tomorrow. The normal pace is
+  // recalculated from the remaining work first. For a deadline within two
+  // days, however, an unlogged planned block becomes a minimum catch-up
+  // target today so it receives the earliest legitimate opening.
+  const recoveryTodayMinutes = daysUntilDue <= 2
+    ? Math.min(remainingMinutes, getPreviousDayMissedMissionMinutes(state, assignment.id, currentTime))
+    : 0;
   const extraTodayMinutes = forceFinishToday
     ? remainingMinutes
     : shortageMinutes > 0
       ? Math.min(remainingMinutes, Math.max(30, Math.ceil(shortageMinutes / Math.max(1, daysUntilDue + 1) / 5) * 5))
+      : bufferedCapacityShortfall > 0
+        ? Math.min(
+            remainingMinutes,
+            Math.max(safeDailyPaceMinutes, Math.ceil(bufferedCapacityShortfall / bufferedWorkDays / 5) * 5),
+          )
       : futureAvailableMinutes < remainingMinutes * 1.5
         ? Math.min(remainingMinutes, 20)
         : 0;
@@ -1412,8 +1559,64 @@ function getLookaheadAdjustment(
   return {
     extraTodayMinutes,
     forceFinishToday,
-    planningPressureScore: forceFinishToday ? 90 : shortageMinutes > 0 ? 45 : futureAvailableMinutes < remainingMinutes * 1.5 ? 20 : 0,
+    availableWorkDays,
+    bufferedWorkDays,
+    safeDailyPaceMinutes,
+    recoveryTodayMinutes,
+    planningPressureScore: forceFinishToday
+      ? 90
+      : recoveryTodayMinutes > 0
+        ? 70
+      : shortageMinutes > 0
+        ? 45
+        : bufferedCapacityShortfall > 0
+          ? 35
+          : futureAvailableMinutes < remainingMinutes * 1.5
+            ? 20
+            : 0,
   };
+}
+
+function getDeadlineCapacityWarning(state: StudentState, currentTime: string) {
+  const offsetMinutes = parsePlanningOffsetMinutes(currentTime);
+  const todayKey = currentTime.slice(0, 10);
+  const urgentWork = state.assignments
+    .filter((assignment) => !assignment.completed)
+    .filter((assignment) => assignment.assessmentType !== "test" && assignment.assessmentType !== "quiz")
+    .map((assignment) => ({
+      assignment,
+      remainingMinutes: getTrackedWorkRemainingMinutes(assignment),
+      deadline: getAssignmentDeadline(assignment, currentTime),
+    }))
+    .filter(({ remainingMinutes, deadline }) => remainingMinutes > 0 && deadline.getTime() >= new Date(currentTime).getTime())
+    .filter(({ deadline }) => deadline.getTime() <= new Date(currentTime).getTime() + 14 * 24 * 60 * 60 * 1000)
+    .sort((a, b) => a.deadline.getTime() - b.deadline.getTime());
+
+  for (const { deadline } of urgentWork) {
+    const deadlineDateKey = toDateKeyAtOffset(deadline, offsetMinutes);
+    let capacityMinutes = 0;
+    for (let dayOffset = 0; ; dayOffset += 1) {
+      const dateKey = addDaysToDateKey(todayKey, dayOffset, offsetMinutes);
+      const estimatedCapacity = estimateAvailableMinutesForDate(state, dateKey, offsetMinutes, {
+        currentTime: dayOffset === 0 ? currentTime : undefined,
+      });
+      const deadlineDayMinutes = dateKey === deadlineDateKey
+        ? Math.max(0, Math.floor((deadline.getTime() - toPlanningDateTime(dateKey, "00:00", offsetMinutes).getTime()) / 60000))
+        : estimatedCapacity;
+      capacityMinutes += Math.min(estimatedCapacity, deadlineDayMinutes);
+      if (dateKey === deadlineDateKey || dayOffset >= 45) break;
+    }
+
+    const requiredMinutes = urgentWork
+      .filter((item) => item.deadline.getTime() <= deadline.getTime())
+      .reduce((total, item) => total + item.remainingMinutes, 0);
+    if (requiredMinutes > capacityMinutes) {
+      const shortfall = requiredMinutes - capacityMinutes;
+      return `Deadline capacity warning: confirmed available time is about ${capacityMinutes} minutes before ${toDateKeyAtOffset(deadline, offsetMinutes)}, but ${requiredMinutes} minutes of tracked work are due by then. AcademicOS will schedule every valid non-fixed minute; at least ${shortfall} minutes cannot fit without a real change to commitments or the deadline.`;
+    }
+  }
+
+  return null;
 }
 
 function getPlanningWindow(currentTime: string) {
@@ -1509,13 +1712,18 @@ function scoreAssignmentForToday(assignment: MissionInputAssignment, currentTime
   const now = new Date(currentTime);
   const due = new Date(assignment.dueDate);
   const daysUntilDue = Math.ceil((due.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+  const minutesUntilDeadline = getAssignmentMinutesUntilDeadline(assignment, currentTime);
   const typeWeight = getAssignmentTypePriorityWeight(assignment.assessmentType);
   const userPriorityWeight = assignment.priority === "high" ? 40 : assignment.priority === "medium" ? 20 : 0;
-  const urgencyScore = daysUntilDue <= 0 ? 140 : daysUntilDue === 1 ? 110 : daysUntilDue <= 2 ? 90 : daysUntilDue <= 4 ? 60 : daysUntilDue <= 7 ? 30 : 10;
+  const urgencyScore = minutesUntilDeadline <= 0 ? 160 : minutesUntilDeadline <= 12 * 60 ? 145 : minutesUntilDeadline <= 24 * 60 ? 125 : daysUntilDue <= 2 ? 90 : daysUntilDue <= 4 ? 60 : daysUntilDue <= 7 ? 30 : 10;
   const effortScore = Math.min(30, Math.round(getMissionAssignmentTargetMinutes(assignment, currentTime) / 5));
+  const pacePressureScore = Math.min(
+    90,
+    Math.round((assignment.safeDailyPaceMinutes || assignment.recommendedTodayMinutes || 0) / 2),
+  );
   const planningPressureScore = assignment.planningPressureScore || 0;
 
-  return typeWeight + userPriorityWeight + urgencyScore + effortScore + planningPressureScore + (assignment.weakSubjectPriorityBoost || 0);
+  return typeWeight + userPriorityWeight + urgencyScore + effortScore + pacePressureScore + planningPressureScore + (assignment.weakSubjectPriorityBoost || 0);
 }
 
 function formatMissionAssignment(
@@ -1565,6 +1773,10 @@ function formatMissionAssignment(
     extraTodayMinutes: 0,
     forceFinishToday: false,
     planningPressureScore: 0,
+    availableWorkDays: 1,
+    bufferedWorkDays: 1,
+    safeDailyPaceMinutes: 0,
+    recoveryTodayMinutes: 0,
   };
   const remainingMinutes = planningStyle === "tracked-work"
     ? trackedWorkFramework?.remainingMinutes ?? Math.max(
@@ -1600,11 +1812,17 @@ function formatMissionAssignment(
     : undefined;
 
   if (isAssessmentAssignment(assignment)) {
+    const safeDailyPaceMinutes = Math.max(
+      assessmentFramework?.safeDailyPaceMinutes || 0,
+      lookahead.safeDailyPaceMinutes || 0,
+    );
     const recommendedTodayMinutes = Math.min(
       remainingMinutes,
       Math.max(
         assessmentFramework?.recommendedTodayMinutes || suggestedStudyBlockMinutes || 0,
+        safeDailyPaceMinutes,
         lookahead.extraTodayMinutes || 0,
+        lookahead.recoveryTodayMinutes || 0,
       ),
     );
     const assessmentScore = scoreAssignmentForToday({
@@ -1623,8 +1841,11 @@ function formatMissionAssignment(
       planningStyle,
       remainingMinutes,
       daysUntilDue: assessmentFramework?.daysUntilDue,
-      availableStudyDays: assessmentFramework?.availableStudyDays,
+      availableStudyDays: lookahead.availableWorkDays || assessmentFramework?.availableStudyDays,
+      bufferedStudyDays: lookahead.bufferedWorkDays || assessmentFramework?.bufferedStudyDays,
+      safeDailyPaceMinutes,
       recommendedTodayMinutes,
+      recoveryTodayMinutes: lookahead.recoveryTodayMinutes,
       suggestedStudyBlockMinutes,
       recommendedBlockCount: Math.max(
         assessmentFramework?.recommendedBlockCount || 1,
@@ -1639,13 +1860,19 @@ function formatMissionAssignment(
   }
 
   const shouldFinishToday = Boolean(trackedWorkFramework?.shouldFinishToday || lookahead.forceFinishToday);
+  const safeDailyPaceMinutes = Math.max(
+    trackedWorkFramework?.safeDailyPaceMinutes || 0,
+    lookahead.safeDailyPaceMinutes || 0,
+  );
   const recommendedTodayMinutes = shouldFinishToday
     ? remainingMinutes
     : Math.min(
         remainingMinutes,
         Math.max(
           trackedWorkFramework?.recommendedTodayMinutes || trackedWorkFramework?.preferredBlockMinutes || 0,
+          safeDailyPaceMinutes,
           (trackedWorkFramework?.recommendedTodayMinutes || 0) + (lookahead.extraTodayMinutes || 0),
+          lookahead.recoveryTodayMinutes || 0,
         ),
       );
   const recommendedBlockCount = shouldFinishToday
@@ -1669,8 +1896,11 @@ function formatMissionAssignment(
     planningStyle,
     remainingMinutes,
     daysUntilDue: trackedWorkFramework?.daysUntilDue,
-    availableWorkDays: trackedWorkFramework?.availableWorkDays,
+    availableWorkDays: lookahead.availableWorkDays || trackedWorkFramework?.availableWorkDays,
+    bufferedWorkDays: lookahead.bufferedWorkDays || trackedWorkFramework?.bufferedWorkDays,
+    safeDailyPaceMinutes,
     recommendedTodayMinutes,
+    recoveryTodayMinutes: lookahead.recoveryTodayMinutes,
     suggestedStudyBlockMinutes,
     preferredWorkBlockMinutes: trackedWorkFramework?.preferredBlockMinutes,
     recommendedBlockCount,
@@ -1786,20 +2016,35 @@ function packMissionScheduleForDay(
 
     // Emergency work is deliberately split at fixed-event boundaries. Look
     // for the first open minute first, then trim the block to that window.
+    const calendarFootprintMinutes = event.type === "study"
+      ? getStudyCalendarFootprintMinutes(durationMinutes)
+      : durationMinutes;
+    const minimumStudyMinutes = getMinimumStudyMinutesForSchedule(relatedAssignment, deadlineEmergency);
+    const minimumCalendarFootprintMinutes = event.type === "study"
+      ? getStudyCalendarFootprintMinutes(minimumStudyMinutes)
+      : minimumStudyMinutes;
     const start = findNextOpenStart(
       cursor,
-      deadlineEmergency ? 1 : durationMinutes,
+      deadlineEmergency ? 1 : minimumCalendarFootprintMinutes,
       fixedEvents,
       deadlineEmergency ? 0 : 10,
     );
     const availableMinutes = deadlineEmergency
       ? getAvailableMinutesUntilNextFixedEvent(start, planningEnd, fixedEvents)
-      : Math.max(0, Math.floor((planningEnd.getTime() - start.getTime()) / 60000));
-    if (availableMinutes < durationMinutes) {
-      // A hard deadline may leave a useful short final window. Use it rather
-      // than abandoning the task simply because its preferred block is longer.
-      if (!relatedAssignment?.shouldFinishToday || (availableMinutes < 20 && !deadlineEmergency) || availableMinutes < 1) break;
-      durationMinutes = availableMinutes;
+      : getAvailableMinutesUntilNextFixedEvent(start, planningEnd, fixedEvents);
+    if (availableMinutes < calendarFootprintMinutes) {
+      // When today's total target cannot fit, use the largest legitimate part
+      // of the current opening, then let the next priority item compete for
+      // what remains. This makes capacity a real constraint instead of an
+      // all-or-nothing gate.
+      const fittingStudyMinutes = event.type === "study"
+        ? getStudyMinutesThatFitCalendarWindow(durationMinutes, availableMinutes)
+        : availableMinutes;
+      if (
+        fittingStudyMinutes < minimumStudyMinutes ||
+        fittingStudyMinutes < 1
+      ) continue;
+      durationMinutes = fittingStudyMinutes;
     }
     const end = addMinutes(start, durationMinutes);
 
@@ -1840,14 +2085,19 @@ function packMissionScheduleForDay(
       );
     }
 
-    cursor = addMinutes(end, deadlineEmergency ? 0 : 10);
+    cursor = addMinutes(
+      end,
+      deadlineEmergency ? 0 : 10 + (event.type === "study" ? getRequiredStudyBreakMinutes(durationMinutes) : 0),
+    );
   }
 
   const assessmentTopUpCandidates = assignments
     .filter((assignment) => assignment.planningStyle === "assessment-prep")
     .filter((assignment) => {
+      const scheduledMinutes = scheduledAssessmentMinutes.get(assignment.id) || 0;
       const scheduledBlocks = scheduledAssessmentBlocks.get(assignment.id) || 0;
-      return scheduledBlocks > 0 || (assignment.daysUntilDue ?? 99) <= 1;
+      const targetMinutes = assignment.recommendedTodayMinutes || 0;
+      return scheduledMinutes < targetMinutes && scheduledBlocks < Math.max(1, assignment.recommendedBlockCount || 1);
     })
     .sort((a, b) => scoreAssignmentForToday(b, planningStart.toISOString()) - scoreAssignmentForToday(a, planningStart.toISOString()));
 
@@ -1873,8 +2123,25 @@ function packMissionScheduleForDay(
       const searchStart = lastAssignmentBlock
         ? addMinutes(new Date(lastAssignmentBlock.endTime), deadlineEmergency ? 0 : 10)
         : new Date(planningStart);
-      const start = findNextOpenStart(searchStart, durationMinutes, [...fixedEvents, ...packed]);
-      const end = addMinutes(start, durationMinutes);
+      const calendarFootprintMinutes = getStudyCalendarFootprintMinutes(durationMinutes);
+      const minimumStudyMinutes = getMinimumStudyMinutesForSchedule(assignment, deadlineEmergency);
+      const start = findNextOpenStart(
+        searchStart,
+        deadlineEmergency ? 1 : getStudyCalendarFootprintMinutes(minimumStudyMinutes),
+        [...fixedEvents, ...packed],
+        deadlineEmergency ? 0 : 10,
+      );
+      const availableMinutes = deadlineEmergency
+        ? getAvailableMinutesUntilNextFixedEvent(start, planningEnd, [...fixedEvents, ...packed])
+        : getAvailableMinutesUntilNextFixedEvent(start, planningEnd, [...fixedEvents, ...packed]);
+      const fittingStudyMinutes = availableMinutes < calendarFootprintMinutes
+        ? getStudyMinutesThatFitCalendarWindow(durationMinutes, availableMinutes)
+        : durationMinutes;
+      if (fittingStudyMinutes < minimumStudyMinutes) {
+        break;
+      }
+      const scheduledDurationMinutes = fittingStudyMinutes;
+      const end = addMinutes(start, scheduledDurationMinutes);
 
       if (end.getTime() > planningEnd.getTime()) {
         break;
@@ -1892,7 +2159,7 @@ function packMissionScheduleForDay(
         source: "ai",
       });
 
-      scheduledAssessmentMinutes.set(assignment.id, scheduledMinutesSoFar + durationMinutes);
+      scheduledAssessmentMinutes.set(assignment.id, scheduledMinutesSoFar + scheduledDurationMinutes);
       scheduledAssessmentBlocks.set(assignment.id, scheduledBlocksSoFar + 1);
     }
   }
@@ -1901,7 +2168,8 @@ function packMissionScheduleForDay(
     .filter((assignment) => assignment.planningStyle === "tracked-work")
     .filter((assignment) => {
       const scheduledMinutes = scheduledAssignmentMinutes.get(assignment.id) || 0;
-      return scheduledMinutes > 0 || assignment.shouldFinishToday || assignment.proactiveFoundationWork;
+      const targetMinutes = assignment.recommendedTodayMinutes || assignment.remainingMinutes || 0;
+      return scheduledMinutes < targetMinutes;
     })
     .sort((a, b) => scoreAssignmentForToday(b, planningStart.toISOString()) - scoreAssignmentForToday(a, planningStart.toISOString()));
 
@@ -1938,18 +2206,22 @@ function packMissionScheduleForDay(
       const searchStart = lastAssignmentBlock
         ? addMinutes(new Date(lastAssignmentBlock.endTime), deadlineEmergency ? 0 : 10)
         : new Date(planningStart);
+      const calendarFootprintMinutes = getStudyCalendarFootprintMinutes(durationMinutes);
+      const minimumStudyMinutes = getMinimumStudyMinutesForSchedule(assignment, deadlineEmergency);
+      const minimumCalendarFootprintMinutes = getStudyCalendarFootprintMinutes(minimumStudyMinutes);
       const start = findNextOpenStart(
         searchStart,
-        deadlineEmergency ? 1 : durationMinutes,
+        deadlineEmergency ? 1 : minimumCalendarFootprintMinutes,
         [...fixedEvents, ...packed],
         deadlineEmergency ? 0 : 10,
       );
       const availableMinutes = deadlineEmergency
         ? getAvailableMinutesUntilNextFixedEvent(start, planningEnd, [...fixedEvents, ...packed])
-        : Math.max(0, Math.floor((planningEnd.getTime() - start.getTime()) / 60000));
-      if (availableMinutes < durationMinutes) {
-        if (!assignment.shouldFinishToday || (availableMinutes < 20 && !deadlineEmergency) || availableMinutes < 1) break;
-        durationMinutes = availableMinutes;
+        : getAvailableMinutesUntilNextFixedEvent(start, planningEnd, [...fixedEvents, ...packed]);
+      if (availableMinutes < calendarFootprintMinutes) {
+        const fittingStudyMinutes = getStudyMinutesThatFitCalendarWindow(durationMinutes, availableMinutes);
+        if (fittingStudyMinutes < minimumStudyMinutes || fittingStudyMinutes < 1) break;
+        durationMinutes = fittingStudyMinutes;
       }
       const end = addMinutes(start, durationMinutes);
 
@@ -2159,89 +2431,94 @@ function closeMissionScheduleGaps(
 function insertRequiredStudyBreaks(schedule: CalendarEvent[], createdAt: string) {
   const requiredStudyMinutesBeforeBreak = 60;
   const breakMinutes = 5;
-  const adjusted: CalendarEvent[] = [];
-  let consecutiveStudyMinutes = 0;
-  let previousEventEnd: number | null = null;
-  let previousWasStudy = false;
+  const adjusted = sortMissionSchedule(schedule).map((event) => ({ ...event }));
 
-  for (const event of sortMissionSchedule(schedule)) {
-    const eventStart = new Date(event.startTime);
-    const eventEnd = new Date(event.endTime);
-    const durationMinutes = Math.max(0, Math.round((eventEnd.getTime() - eventStart.getTime()) / 60000));
-    const continuesStudying = event.type === "study" && previousWasStudy && previousEventEnd === eventStart.getTime();
+  // Study breaks take calendar time, never assignment time. Before splitting a
+  // long study event, reserve that time from the immediately following
+  // flexible block (the packer intentionally leaves this room). Fixed events
+  // are never moved; if a hand-entered block has no room, leave it intact.
+  const reserveFollowingFlexibleMinutes = (startIndex: number, from: Date, minutes: number) => {
+    let remainingMinutes = minutes;
+    let cursor = new Date(from);
 
-    if (event.type !== "study" || !continuesStudying) {
-      consecutiveStudyMinutes = 0;
+    for (let index = startIndex; index < adjusted.length && remainingMinutes > 0; index += 1) {
+      const candidate = adjusted[index];
+      const candidateStart = new Date(candidate.startTime);
+      const candidateEnd = new Date(candidate.endTime);
+
+      if (candidateStart.getTime() > cursor.getTime()) {
+        const gapMinutes = Math.floor((candidateStart.getTime() - cursor.getTime()) / 60000);
+        if (gapMinutes >= remainingMinutes) return true;
+        remainingMinutes -= gapMinutes;
+        cursor = candidateStart;
+      }
+
+      if (!isReplaceableMissionBlock(candidate)) return false;
+
+      const candidateMinutes = Math.max(0, Math.floor((candidateEnd.getTime() - cursor.getTime()) / 60000));
+      if (candidateMinutes >= remainingMinutes) {
+        candidate.startTime = addMinutes(cursor, remainingMinutes).toISOString();
+        return true;
+      }
+
+      remainingMinutes -= candidateMinutes;
+      adjusted.splice(index, 1);
+      index -= 1;
+      cursor = candidateEnd;
     }
 
-    if (event.type !== "study" || durationMinutes <= 0) {
-      adjusted.push(event);
-      previousWasStudy = event.type === "study";
-      previousEventEnd = eventEnd.getTime();
+    return remainingMinutes <= 0;
+  };
+
+  for (let index = 0; index < adjusted.length; index += 1) {
+    const event = adjusted[index];
+    if (event.type !== "study") continue;
+
+    const studyStart = new Date(event.startTime);
+    const studyMinutes = Math.max(0, Math.round((new Date(event.endTime).getTime() - studyStart.getTime()) / 60000));
+    const breakCount = Math.floor((studyMinutes - 1) / requiredStudyMinutesBeforeBreak);
+    if (studyMinutes <= requiredStudyMinutesBeforeBreak || breakCount <= 0) continue;
+
+    const totalBreakMinutes = breakCount * breakMinutes;
+    if (!reserveFollowingFlexibleMinutes(index + 1, new Date(event.endTime), totalBreakMinutes)) {
       continue;
     }
 
-    let cursor = new Date(eventStart);
-    let remainingWindowMinutes = durationMinutes;
+    const segments: CalendarEvent[] = [];
+    let segmentStart = new Date(studyStart);
+    let remainingStudyMinutes = studyMinutes;
     let segmentIndex = 0;
 
-    while (remainingWindowMinutes > 0) {
-      const minutesUntilBreak = requiredStudyMinutesBeforeBreak - consecutiveStudyMinutes;
-      const studyMinutes = Math.min(remainingWindowMinutes, minutesUntilBreak);
-
-      if (studyMinutes > 0) {
-        const segmentEnd = addMinutes(cursor, studyMinutes);
-        adjusted.push({
-          ...event,
-          id: segmentIndex === 0 && studyMinutes === durationMinutes
-            ? event.id
-            : `${event.id}:study:${segmentIndex}:${crypto.randomUUID()}`,
-          startTime: cursor.toISOString(),
-          endTime: segmentEnd.toISOString(),
-        });
-        cursor = segmentEnd;
-        remainingWindowMinutes -= studyMinutes;
-        consecutiveStudyMinutes += studyMinutes;
-        segmentIndex += 1;
-      }
-
-      if (consecutiveStudyMinutes < requiredStudyMinutesBeforeBreak || remainingWindowMinutes <= 0) {
-        continue;
-      }
-
-      // A tiny tail at the end of a completed session does not need a break
-      // after it, because the student is no longer continuing to study.
-      if (remainingWindowMinutes <= breakMinutes) {
-        const segmentEnd = addMinutes(cursor, remainingWindowMinutes);
-        adjusted.push({
-          ...event,
-          id: `${event.id}:study:${segmentIndex}:${crypto.randomUUID()}`,
-          startTime: cursor.toISOString(),
-          endTime: segmentEnd.toISOString(),
-        });
-        consecutiveStudyMinutes += remainingWindowMinutes;
-        remainingWindowMinutes = 0;
-        continue;
-      }
-
-      const actualBreakMinutes = Math.min(breakMinutes, remainingWindowMinutes);
-      adjusted.push({
-        id: `study-break:${crypto.randomUUID()}`,
-        title: "Short study break",
-        type: "break",
-        startTime: cursor.toISOString(),
-        endTime: addMinutes(cursor, actualBreakMinutes).toISOString(),
-        priority: 7,
-        createdAt,
-        source: "ai",
+    while (remainingStudyMinutes > 0) {
+      const segmentMinutes = Math.min(requiredStudyMinutesBeforeBreak, remainingStudyMinutes);
+      const segmentEnd = addMinutes(segmentStart, segmentMinutes);
+      segments.push({
+        ...event,
+        id: segmentIndex === 0 ? event.id : `${event.id}:study:${segmentIndex}:${crypto.randomUUID()}`,
+        startTime: segmentStart.toISOString(),
+        endTime: segmentEnd.toISOString(),
       });
-      cursor = addMinutes(cursor, actualBreakMinutes);
-      remainingWindowMinutes -= actualBreakMinutes;
-      consecutiveStudyMinutes = 0;
+      remainingStudyMinutes -= segmentMinutes;
+      segmentIndex += 1;
+
+      if (remainingStudyMinutes > 0) {
+        const breakEnd = addMinutes(segmentEnd, breakMinutes);
+        segments.push({
+          id: `study-break:${crypto.randomUUID()}`,
+          title: "Short study break",
+          type: "break",
+          startTime: segmentEnd.toISOString(),
+          endTime: breakEnd.toISOString(),
+          priority: 7,
+          createdAt,
+          source: "ai",
+        });
+        segmentStart = breakEnd;
+      }
     }
 
-    previousWasStudy = true;
-    previousEventEnd = eventEnd.getTime();
+    adjusted.splice(index, 1, ...segments);
+    index += segments.length - 1;
   }
 
   return adjusted;
@@ -2463,31 +2740,64 @@ function extractQuickUpdateAnchorPreference(input: string) {
     return {
       relation: null as "before" | "after" | null,
       terms: extractQuickUpdateAnchorKeywords(input),
+      referenceTime: null,
     };
   }
 
   const relation = relationMatch[1].toLowerCase() as "before" | "after";
-  const anchorPhrase = relationMatch[2]
+  const rawAnchorPhrase = relationMatch[2];
+  const timeMatch = rawAnchorPhrase.match(/\b(?:at\s+)?(\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm))\b/i);
+  const anchorPhrase = rawAnchorPhrase
+    .replace(/\b(?:at\s+)?\d{1,2}:\d{2}\s*(?:am|pm)?\b/gi, "")
+    .replace(/\b(?:at\s+)?\d{1,2}\s*(?:am|pm)\b/gi, "")
     .replace(/\b(?:today|tonight|this morning|this afternoon|this evening)\b/gi, "")
     .trim();
 
   return {
     relation,
     terms: buildAnchorTerms(anchorPhrase),
+    referenceTime: timeMatch?.[1] || null,
   };
+}
+
+function resolveQuickUpdateReferenceTime(referenceTime: string | null, currentTime: string) {
+  if (!referenceTime) return null;
+
+  const normalized = referenceTime.trim().toLowerCase().replace(/\s+/g, "");
+  const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minutes = Number(match[2] || "0");
+  const period = match[3];
+  if (!Number.isInteger(hour) || !Number.isInteger(minutes) || minutes > 59) return null;
+  if (period === "pm" && hour < 12) hour += 12;
+  if (period === "am" && hour === 12) hour = 0;
+  if (hour > 23) return null;
+
+  const offset = currentTime.match(/([+-]\d{2}:\d{2}|Z)$/)?.[1] || "Z";
+  return new Date(`${currentTime.slice(0, 10)}T${String(hour).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:00${offset}`);
 }
 
 function findQuickUpdateAnchorEvent(schedule: CalendarEvent[], input: string, currentTime: string) {
   const currentMillis = new Date(currentTime).getTime();
   const anchorPreference = extractQuickUpdateAnchorPreference(input);
   const ordered = sortMissionSchedule(schedule).filter((event) => new Date(event.endTime).getTime() > currentMillis);
+  const referenceTime = resolveQuickUpdateReferenceTime(anchorPreference.referenceTime || null, currentTime);
+  const matchesReferenceTime = (event: CalendarEvent) => !referenceTime || (
+    new Date(event.startTime).getTime() <= referenceTime.getTime() &&
+    referenceTime.getTime() < new Date(event.endTime).getTime()
+  );
 
   for (const term of anchorPreference.terms) {
-    const exactMatch = ordered.find((event) => normalizeAnchorText(event.title) === term);
+    const exactMatch = ordered.find((event) =>
+      normalizeAnchorText(event.title) === term && matchesReferenceTime(event),
+    );
     if (exactMatch) {
       return {
         relation: anchorPreference.relation,
         event: exactMatch,
+        unresolved: false,
       };
     }
   }
@@ -2495,19 +2805,25 @@ function findQuickUpdateAnchorEvent(schedule: CalendarEvent[], input: string, cu
   for (const term of anchorPreference.terms) {
     const containsMatch = ordered.find((event) => {
       const title = normalizeAnchorText(event.title);
-      return title.includes(term) || term.includes(title);
+      return matchesReferenceTime(event) && (title.includes(term) || term.includes(title));
     });
     if (containsMatch) {
       return {
         relation: anchorPreference.relation,
         event: containsMatch,
+        unresolved: false,
       };
     }
   }
 
   return {
     relation: anchorPreference.relation,
-    event: ordered.find((event) => !isReplaceableMissionBlock(event)) || null,
+    // An explicit named/time-qualified reference must never silently fall
+    // back to some other block. The caller will keep the mission unchanged.
+    event: anchorPreference.terms.length || referenceTime
+      ? null
+      : ordered.find((event) => !isReplaceableMissionBlock(event)) || null,
+    unresolved: Boolean(anchorPreference.terms.length || referenceTime),
   };
 }
 
@@ -2694,6 +3010,13 @@ function applyQuickUpdateToSchedule(
     };
   }
   const anchor = findQuickUpdateAnchorEvent(schedule, input, currentTime);
+  if (anchor.unresolved && !anchor.event) {
+    return {
+      schedule: constrainScheduleToPlanningDay(schedule, planningStart, planningEnd, planningDayKey, planningOffsetMinutes),
+      inserted: null,
+      failureReason: "AcademicOS could not find the exact Mission block you referenced, so it left today's plan unchanged.",
+    };
+  }
   const insertionWindow = findInsertionWindow(
     schedule,
     durationMinutes,
@@ -3561,6 +3884,7 @@ export async function POST(req: Request) {
             subject: assignment.subject,
             assessmentType: assignment.assessmentType,
             dueDate: assignment.dueDate,
+            dueTime: assignment.dueTime,
             priority: assignment.priority,
             estimatedMinutes: assignment.estimatedMinutes,
             progressPercent: assignment.progress?.percentComplete,
@@ -3741,6 +4065,7 @@ export async function POST(req: Request) {
             subject: assignment.subject,
             assessmentType: assignment.assessmentType,
             dueDate: assignment.dueDate,
+            dueTime: assignment.dueTime,
             priority: assignment.priority,
             estimatedMinutes: assignment.estimatedMinutes,
             progressPercent: assignment.progress?.percentComplete,
@@ -3776,6 +4101,7 @@ export async function POST(req: Request) {
           subject: assignment.subject,
           assessmentType: assignment.assessmentType,
           dueDate: assignment.dueDate,
+          dueTime: assignment.dueTime,
           priority: assignment.priority,
           estimatedMinutes: assignment.estimatedMinutes,
           progressPercent: assignment.progress?.percentComplete,
@@ -3816,10 +4142,10 @@ export async function POST(req: Request) {
         expectedFinishTime: budgetedQuickUpdateSchedule.at(-1)?.endTime || baseMission.currentTime,
         summary: amended.inserted
           ? `AcademicOS kept today's plan, preserved fixed events, and added ${amended.inserted.title}.`
-          : "AcademicOS kept today's existing mission plan.",
+          : amended.failureReason || "AcademicOS kept today's existing mission plan.",
         reason: amended.inserted
           ? `Quick update added: ${amended.inserted.title}`
-          : "Quick update kept the existing mission plan.",
+          : amended.failureReason || "Quick update kept the existing mission plan.",
       }, state, quickAssignments, currentTime);
       applyBurnoutSafeguards(finalMission, state, quickAssignments, currentTime);
       finalMission = applyAuthoritativeMentalState({
@@ -3861,6 +4187,7 @@ export async function POST(req: Request) {
                 subject: assignment.subject,
                 assessmentType: assignment.assessmentType,
                 dueDate: assignment.dueDate,
+                dueTime: assignment.dueTime,
                 priority: assignment.priority,
                 estimatedMinutes: assignment.estimatedMinutes,
                 progressPercent: assignment.progress?.percentComplete,
@@ -3970,7 +4297,7 @@ export async function POST(req: Request) {
 
     const intelligence = buildAcademicIntelligenceSnapshot(state, currentTime);
     const suppressedAssignmentIds = getActiveMissionSuppressedAssignmentIds(state, currentTime);
-    const missionAssignments = getUpcomingMissionAssignments(
+    const allMissionAssignments = getUpcomingMissionAssignments(
       state.assignments
       .filter((a) => !a.completed)
       .filter((assignment) => !isPlaceholderAssignment({
@@ -3986,6 +4313,7 @@ export async function POST(req: Request) {
         subject: a.subject,
         assessmentType: a.assessmentType,
         dueDate: a.dueDate,
+        dueTime: a.dueTime,
         priority: a.priority,
         estimatedMinutes: a.estimatedMinutes,
         progressPercent: a.progress?.percentComplete,
@@ -3993,10 +4321,13 @@ export async function POST(req: Request) {
         notes: a.notes,
       }, currentTime, state)),
       currentTime,
-      14,
+      45,
       suppressedAssignmentIds,
-    )
-      .slice(0, 6);
+    );
+    // Keep the AI prompt focused, but let deterministic packing account for
+    // every relevant item. The AI proposes a plan; capacity enforcement must
+    // never lose lower-ranked real work because of a prompt-size cap.
+    const missionAssignments = allMissionAssignments.slice(0, 6);
     const hasAcademicMaterial = missionAssignments.length > 0 || state.documents.length > 0;
     const missionDocuments = state.documents.map(document => ({
       title: document.title,
@@ -4131,12 +4462,38 @@ Every study block must name the exact assignment, course, document, or subject b
 - remainingMinutes tells you how much tracked work is left
 - shouldFinishToday = true means the assignment must be fully completed today
 - recommendedTodayMinutes is how much tracked work belongs today
+- recoveryTodayMinutes is the minimum catch-up amount from an unlogged prior-day mission block when the deadline is within two days; it is already capped by remainingMinutes
 - preferredWorkBlockMinutes is the preferred size of one tracked-work block
 - planningStyle = "assessment-prep" means this is test or quiz preparation, not finishable task progress
 - recommendedTodayMinutes is how much total prep time belongs today
 - suggestedStudyBlockMinutes is the preferred size of one prep block
 - recommendedBlockCount is the maximum number of prep blocks that item should get today
 - minimumStudyBlockMinutes and maximumStudyBlockMinutes are hard guardrails for one focused work block
+- safeDailyPaceMinutes is the minimum steady pace that keeps the item safe: it divides the remaining work by only 75% of its usable work/study days, preserving the other 25% as a disruption and recovery buffer.
+- bufferedWorkDays or bufferedStudyDays is the number of days inside that protected completion window.
+- planningPressureScore rises when confirmed fixed commitments make that buffered pace unsafe. Treat it as a deterministic warning, not a suggestion.
+- dueTime is an optional local deadline clock. When supplied, it is authoritative. When omitted, assume 23:59 local time on dueDate. Do not treat a 09:00 deadline as though the student has that entire evening available.
+
+22.5. Deadline pace framework:
+- For every real assignment, homework item, project, test, or quiz, schedule at least its safeDailyPaceMinutes before using discretionary free time, unless confirmed fixed events leave no valid opening.
+- Do not call an item safe merely because it has one study block. Compare the total scheduled minutes for that item against recommendedTodayMinutes and safeDailyPaceMinutes.
+- The 25% buffer is intentional. Do not spend it casually on free time, optional weak-subject review, or lower-priority get-ahead work while a real item is below pace.
+- If today cannot meet the safe pace because of fixed events, assign the earliest valid minutes available today. Then increase priority and pace on the next available day; never silently defer it to the end of the deadline.
+- If all remaining capacity through the deadline is lower than the remaining tracked work, mark the situation plainly in the summary as an emergency and schedule every non-fixed minute allowed by the deterministic deadline policy.
+- When several items compete for limited time, protect work due sooner first. For otherwise similar deadlines, protect the item with the larger pace shortfall, higher user priority, greater remaining effort, or weaker course performance.
+- For assignments, homework, and projects, scheduled tracked work must never exceed remainingMinutes. If the safe pace would exceed remainingMinutes, schedule only the remaining amount.
+- For tests and quizzes, safeDailyPaceMinutes is a pacing target for distributed preparation. It can be exceeded only after all finishable deadline work is safely on pace; excess assessment preparation is lower priority.
+- A missed session is not treated as failure or erased work. Recalculate the pace from the newly remaining minutes and remaining usable days; do not blindly copy all missed minutes into the next day. When the deadline is within two days, recoveryTodayMinutes is a mandatory catch-up floor and should receive the earliest legitimate opening after fixed events. Otherwise distribute catch-up through the remaining buffered work/study days.
+- The summary must be concrete when a high-effort item is present: state scheduled minutes today, remaining minutes, buffered work/study days, and whether the item is on track, at risk, or in emergency status. Never substitute generic workload-management advice for this calculation.
+
+22.6. Capacity, commitment, and stability framework:
+- Hard blocks are confirmed calendar events, school, work, appointments, church, travel, and any user-locked manual Mission block. They are immovable and must retain their exact times.
+- Soft blocks are free time, optional personal projects, AI study blocks, and unconfirmed recovery time. Reallocate soft blocks before considering any change to a hard block.
+- When the total work required before one or more deadlines exceeds confirmed usable capacity, schedule the highest-priority real work into every valid non-fixed minute. State the shortfall plainly in the summary. Never claim the deadline is safe when the arithmetic says otherwise.
+- Preserve a working existing plan. On a replan, retain matching hard blocks and user-locked blocks exactly. Keep existing study blocks when their assignment, duration, and time remain valid; change only blocks affected by new facts, a user request, a deadline-capacity problem, or an explicit health change.
+- Do not reshuffle a healthy schedule merely to produce a different-looking plan.
+- Treat travel or location-specific time conservatively. Bus or transit time may support flashcards, reading, low-stakes review, short online modules, or planning. Do not place deep writing, major problem sets, tests, or work needing extensive materials there unless the user explicitly asks.
+- A request that says before or after a named Mission block is an exact placement request. If it adds a time such as "after Work on Driving at 16:25", match the block title and require that 16:25 falls inside that block. Place the new block immediately before or after the matched block using only flexible available time. If there is no exact match or no valid opening, leave the schedule unchanged and say so; never guess a different anchor.
 
 23. For tracked-work assignments with shouldFinishToday = true, schedule the full remainingMinutes today, either in one block or multiple blocks.
 
@@ -4297,7 +4654,7 @@ Every study block must name the exact assignment, course, document, or subject b
           fixedEvents,
           planningStart,
           planningEnd,
-          missionAssignments,
+          allMissionAssignments,
           missionDocuments,
           deadlineEmergencyPolicy.active,
         );
@@ -4340,14 +4697,16 @@ Every study block must name the exact assignment, course, document, or subject b
     );
     applyAuthoritativeMentalState(mission, state, missionAssignments, currentTime);
     const sortedMission = sortMission(mission);
+    const capacityWarning = getDeadlineCapacityWarning(state, currentTime);
+    const baseSummary = deadlineEmergencyPolicy.active
+      ? buildDeadlineEmergencySummary(sortedMission.schedule, missionAssignments, deadlineEmergencyPolicy)
+      : bedtimePolicy.lateMinutes > 0
+      ? `${sortedMission.summary} Bedtime was extended to ${bedtimePolicy.effectiveSleepTarget} because confirmed near-deadline work exceeds normal pre-deadline capacity.`
+      : sortedMission.summary;
     const finalMission = {
       ...sortedMission,
       expectedFinishTime: sortedMission.schedule.at(-1)?.endTime || sortedMission.currentTime,
-      summary: deadlineEmergencyPolicy.active
-        ? buildDeadlineEmergencySummary(sortedMission.schedule, missionAssignments, deadlineEmergencyPolicy)
-        : bedtimePolicy.lateMinutes > 0
-        ? `${sortedMission.summary} Bedtime was extended to ${bedtimePolicy.effectiveSleepTarget} because confirmed near-deadline work exceeds normal pre-deadline capacity.`
-        : sortedMission.summary,
+      summary: capacityWarning ? `${baseSummary} ${capacityWarning}` : baseSummary,
     };
     const missionWithReason = {
       ...finalMission,

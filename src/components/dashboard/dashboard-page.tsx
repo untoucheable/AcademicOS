@@ -460,6 +460,7 @@ export function DashboardPageContent() {
               course: data.course.trim(),
               assessmentType: data.assessmentType,
               dueDate: data.dueDate,
+              dueTime: data.dueTime || undefined,
               priority: data.priority,
               notes: data.notes.trim(),
               estimatedMinutes: data.estimatedMinutes,
